@@ -13,3 +13,9 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.21.3",
 ]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.30.1",
+    "matplotlib>=3.10.6",
+]
