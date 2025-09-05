@@ -1,0 +1,13 @@
+[project]
+name = "pointcloudnet"
+version = "0.1.0"
+description = "Neural Net for high-dimensional point cloud data."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.3.2",
+    "scikit-learn>=1.7.1",
+    "torch>=2.8.0",
+    "tqdm>=4.67.1",
+    "wandb>=0.21.3",
+]
