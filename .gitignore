@@ -40,3 +40,4 @@ pointnet_baseline.py
 main_classification_sigma.sh
 main_classification.sh
 LICENSE.md
+*.pyc
