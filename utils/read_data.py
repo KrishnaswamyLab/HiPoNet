@@ -13,6 +13,7 @@ import pandas as pd
 
 
 def load_data(raw_dir, full):
+    raw_dir = raw_dir.rstrip('/')
     data_name = raw_dir.split('/')[-1]
     if data_name == "melanoma_data_full":
         if full:
