@@ -13,7 +13,8 @@ import pandas as pd
 
 
 def load_data(raw_dir, full):
-    if raw_dir == "melanoma_data_full":
+    data_name = raw_dir.split('/')[-1]
+    if data_name == "melanoma_data_full":
         if full:
             suffix = '_full'
         else:
@@ -23,7 +24,7 @@ def load_data(raw_dir, full):
             PCs = [torch.tensor(StandardScaler().fit_transform(PCs[i]), dtype=torch.float) for i in range(len(PCs))]
         labels = np.load(os.path.join(raw_dir, 'labels'+suffix+'.npy'))
         num_labels = len(np.unique(labels))
-    elif raw_dir == "COVID_data":
+    elif data_name == "COVID_data":
         with open(os.path.join(raw_dir, 'filtered_point_clouds_final.pickle'), 'rb') as handle:
             PCs = pickle.load(handle)
             PCs = [torch.tensor(StandardScaler().fit_transform(PCs[i].values[:100]), dtype=torch.float) for i in PCs]
@@ -37,7 +38,7 @@ def load_data(raw_dir, full):
         #     subsampled_patient_ids = pickle.load(handle)
         # labels = np.load(os.path.join(raw_dir, 'labels.npy'))
         num_labels = len(np.unique(labels))
-    elif raw_dir == "pdo_data":
+    elif data_name == "pdo_data":
         with open(osp.join(raw_dir, 'pc_pdo_treatment.pkl'), 'rb') as handle:
             PCs = pickle.load(handle)
             PCs = [torch.tensor(StandardScaler().fit_transform(PCs[i]), dtype=torch.float) for i in range(len(PCs))]
@@ -50,6 +51,8 @@ def load_data(raw_dir, full):
         PCs = [PCs[i] for i in keep]
         labels = [labels[i] for i in keep]
         num_labels = len(np.unique(labels))
+    else:
+        raise ValueError(f"Dataset {data_name} not recognized.")
     return PCs, labels, num_labels
 
 def load_data_persistence(raw_dir, full):
