@@ -7,5 +7,6 @@
 #SBATCH --partition=gpu
 
 source .venv/bin/activate
+uv run wandb login $WANDB_API_KEY
 echo "Starting classification job with arguments..." $@
 uv run main_classification.py --gpu=1 $@
