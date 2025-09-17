@@ -34,8 +34,8 @@ parser.add_argument(
     "--hidden_dim", type=int, default=256, help="Hidden dim for the MLP"
 )
 parser.add_argument("--num_layers", type=int, default=3, help="Number of MLP layers")
-parser.add_argument("--lr", type=float, default=1e-4, help="Learning Rate")
-parser.add_argument("--wd", type=float, default=1e-4, help="Weight decay")
+parser.add_argument("--lr", type=float, default=0.01, help="Learning Rate")
+parser.add_argument("--wd", type=float, default=3e-3, help="Weight decay")
 parser.add_argument("--num_epochs", type=int, default=20, help="Number of epochs")
 parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
 parser.add_argument("--gpu", type=int, default=0, help="GPU index")
