@@ -100,6 +100,9 @@ def train(model, mlp, PCs, labels):
                 for name, param in model.named_parameters():
                     if param.grad is not None:
                         wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
+                for name, param in mlp.named_parameters():
+                    if param.grad is not None:
+                        wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
                 opt.step()
                 t_loss += loss.item()
                 del (X, logits, loss, preds)
