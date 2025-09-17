@@ -41,3 +41,4 @@ main_classification_sigma.sh
 main_classification.sh
 LICENSE.md
 *.pyc
+*.out
