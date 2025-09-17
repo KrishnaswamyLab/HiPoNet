@@ -31,7 +31,7 @@ parser.add_argument(
 parser.add_argument("--sigma", type=float, default=0.5, help="Bandwidth")
 parser.add_argument("--K", type=int, default=1, help="Order of simplicial complex")
 parser.add_argument(
-    "--hidden_dim", type=int, default=250, help="Hidden dim for the MLP"
+    "--hidden_dim", type=int, default=256, help="Hidden dim for the MLP"
 )
 parser.add_argument("--num_layers", type=int, default=3, help="Number of MLP layers")
 parser.add_argument("--lr", type=float, default=0.01, help="Learnign Rate")
