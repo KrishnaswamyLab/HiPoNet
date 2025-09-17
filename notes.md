@@ -1,0 +1,5 @@
+- Changed lr and wd to match paper (1e-4) but this gave bad results
+- Why is hidden dim 250 instead of 256?
+- Is batch size 32 always correct?
+- Alpha gradients are going to zero
+- Loss just stalls and doesn't go anywhere
