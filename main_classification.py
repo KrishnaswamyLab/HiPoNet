@@ -93,8 +93,8 @@ def train(model, mlp, PCs, labels):
                 logits = mlp(X)
                 preds = torch.argmax(logits, dim=1)
                 correct_train += torch.sum(preds == labels[idx]).float()
-                loss = (
-                    loss_fn(logits, labels[idx]) * 100
+                loss = loss_fn(
+                    logits, labels[idx]
                 )  # + 0.1*(model.layer.alphas@model.layer.alphas.T - torch.eye(args.num_weights).to(args.device)).square().mean()
                 loss.backward()
                 for name, param in model.named_parameters():
@@ -146,6 +146,10 @@ def train(model, mlp, PCs, labels):
 
 if __name__ == "__main__":
     wandb.init(project="pointcloud-net-k-fold", config=vars(args))
+    
+    import os
+    slurm_job_id = os.environ.get("SLURM_JOB_ID", "local")
+    wandb.log({"slurm_job_id": slurm_job_id})
 
     PCs, labels, num_labels = load_data(args.raw_dir, args.full)
     model = HiPoNet(
