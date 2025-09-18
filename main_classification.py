@@ -145,12 +145,12 @@ def train(model, mlp, PCs, labels):
 
 
 if __name__ == "__main__":
-    wandb.init(project="pointcloud-net-k-fold", config=vars(args))
-    
     import os
-    slurm_job_id = os.environ.get("SLURM_JOB_ID", "local")
-    wandb.log({"slurm_job_id": slurm_job_id})
 
+    config = vars(args)
+    config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
+    wandb.init(project="pointcloud-net-k-fold", config=config)
+    
     PCs, labels, num_labels = load_data(args.raw_dir, args.full)
     model = HiPoNet(
         PCs[0].shape[1], args.num_weights, args.threshold, args.K, args.device
