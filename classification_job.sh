@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=hiponet_classification
-#SBATCH --time=2:00:00
+#SBATCH --time=00:30:00
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=t.long@yale.edu
 #SBATCH --gpus=rtx_5000_ada:1
