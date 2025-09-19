@@ -32,7 +32,6 @@ class GraphFeatLearningLayer(nn.Module):
         all_node_feats   = []
         
         batch = []
-        batch_pc   = []
 
         node_offset = 0 
 
