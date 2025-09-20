@@ -142,7 +142,11 @@ def main():
 
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
-    wandb.init(project="pointcloud-net-k-fold", config=config, mode="disabled" if args.disable_wb else None)
+    wandb.init(
+        project="pointcloud-net-k-fold",
+        config=config,
+        mode="disabled" if args.disable_wb else None,
+    )
 
     PCs, labels, num_labels = load_data(args.raw_dir, args.full)
     hiponet = HiPoNet(
@@ -154,7 +158,7 @@ def main():
         args.sigma,
     )
     with torch.no_grad():
-        input_dim = hiponet([PCs[0].to(args.device)]).shape[1]
+        input_dim = hiponet(PCs[0].to(args.device)[None, ...]).shape[1]
     mlp_classifier = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(
         args.device
     )
