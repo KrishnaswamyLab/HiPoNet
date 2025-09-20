@@ -53,10 +53,21 @@ def collate_fn(batch):
     # We do this because DataParallel requires an explicit batch dimension
     # So we need our data to be a tensor, but the different point clouds have different
     # number of points, so we use nested tensors
-    data = torch.nested.as_nested_tensor(
-        [item[0] for item in batch], layout=torch.jagged
-    )
-    labels = torch.LongTensor([item[1] for item in batch])
+
+    # We sort by size because we want to ensure both GPUs get roughly equal amount of work
+    batch = sorted(batch, key=lambda x: x[0].shape[0])
+
+    data, labels = [], []
+    for i in range(len(batch) // 2):
+        x, label = batch.pop(0)
+        data.append(x)
+        labels.append(label)
+        x, label = batch.pop(-1)
+        data.append(x)
+        labels.append(label)
+
+    data = torch.nested.as_nested_tensor(data, layout=torch.jagged)
+    labels = torch.LongTensor(labels)
     return data, labels
 
 
@@ -69,7 +80,7 @@ def test(model, loader):
             logits = model(batch)
             labels = labels.to(logits.device)
             preds = torch.argmax(logits, dim=1)
-            correct += torch.sum(preds == labels).float()
+            correct += torch.sum(preds == labels).detach().float().item()
             total += len(labels)
     return (correct * 100) / total
 
@@ -106,11 +117,11 @@ def train(model: nn.Module, PCs, labels):
                 logits = model(batch)
                 labels = labels.to(logits.device)
                 preds = torch.argmax(logits, dim=1)
-                correct_train += torch.sum(preds == labels).float()
+                correct_train += torch.sum(preds == labels).detach().float().item()
                 loss = loss_fn(logits, labels)
                 loss.backward()
                 opt.step()
-                t_loss += loss.item()
+                t_loss += loss.detach().item()
                 del (logits, loss, preds)
                 torch.cuda.empty_cache()
                 gc.collect()
@@ -126,21 +137,23 @@ def train(model: nn.Module, PCs, labels):
             wandb.log(
                 {
                     "Loss": t_loss,
-                    "Train acc": train_acc.item(),
-                    "Test acc": test_acc.item(),
+                    "Train acc": train_acc,
+                    "Test acc": test_acc,
                 },
                 step=epoch + 1,
             )
 
             tq.set_description(
                 "Train Loss = %.4f, Train acc = %.4f, Test acc = %.4f, Best acc = %.4f"
-                % (t_loss, train_acc.item(), test_acc.item(), best_acc)
+                % (t_loss, train_acc, test_acc, best_acc)
             )
     print(f"Best accuracy : {best_acc}")
 
 
 def main():
     import os
+
+    assert args.batch_size % 2 == 0, "Batch size must be even"
 
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
