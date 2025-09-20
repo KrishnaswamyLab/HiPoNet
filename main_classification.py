@@ -105,9 +105,6 @@ def train(model: nn.Module, PCs, labels):
                 preds = torch.argmax(logits, dim=1)
                 correct_train += torch.sum(preds == labels).float()
                 loss = loss_fn(logits, labels)
-                from IPython import embed
-
-                embed()
                 loss.backward()
                 opt.step()
                 t_loss += loss.item()
