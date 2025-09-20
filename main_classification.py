@@ -48,69 +48,69 @@ else:
     args.device = "cpu"
 
 
-def test(model, mlp, PCs, labels, loader):
+def test(model, loader):
     model.eval()
-    mlp.eval()
     correct = 0
     total = 0
     with torch.no_grad():
-        for idx in loader:
-            # X = model(idx, 0.000001)
-            X = model([PCs[i].to(args.device) for i in idx], args.sigma)
-            logits = mlp(X)
+        for batch, labels in loader:
+            logits = model(batch)
             preds = torch.argmax(logits, dim=1)
-            correct += torch.sum(preds == labels[idx]).float()
-            total += len(idx)
+            correct += torch.sum(preds == labels).float()
+            total += len(labels)
     return (correct * 100) / total
 
 
-def train(model, mlp, PCs, labels):
+def train(model: nn.Module, PCs, labels):
     print(args)
     opt = torch.optim.AdamW(
-        list(model.parameters()) + list(mlp.parameters()),
+        list(model.parameters()),
         lr=args.lr,
         weight_decay=args.wd,
     )
     train_idx, test_idx = train_test_split(np.arange(len(labels)), test_size=0.2)
-    train_idx = torch.LongTensor(train_idx).to(args.device)
-    test_idx = torch.LongTensor(test_idx).to(args.device)
-    train_loader = DataLoader(train_idx, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_idx, batch_size=args.batch_size)
-    # labels = torch.LongTensor(model.labels).to(args.device)
-    labels = torch.LongTensor(labels).to(args.device)
+    # We do this because DataParallel requires an explicit batch dimension
+    # So we need our data to be a tensor, but the different point clouds have different 
+    # number of points, so we use nested tensors
+    train_data = torch.nested.as_nested_tensor(
+        [PCs[i] for i in train_idx], layout=torch.jagged
+    )
+    test_data = torch.nested.as_nested_tensor(
+        [PCs[i] for i in test_idx], layout=torch.jagged
+    )
+    train_labels = torch.LongTensor([labels[i] for i in train_idx])
+    test_labels = torch.LongTensor([labels[i] for i in test_idx])
+    train_dataset = torch.utils.data.TensorDataset(train_data, train_labels)
+    test_dataset = torch.utils.data.TensorDataset(test_data, test_labels)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
     loss_fn = torch.nn.CrossEntropyLoss()
-    best_acc = test(model, mlp, PCs, labels, test_loader)
+    best_acc = 0  # best_acc = test(model, mlp, PCs, labels, test_loader)
     with tqdm(range(args.num_epochs)) as tq:
-        for e, epoch in enumerate(tq):
+        for epoch in tq:
             correct_train = 0
             t_loss = 0
             model.train()
-            mlp.train()
-            for idx in train_loader:
+            for batch, labels in train_loader:
                 opt.zero_grad()
-
-                X = model([PCs[i].to(args.device) for i in idx], args.sigma)
-                logits = mlp(X)
+                logits = model(batch)
                 preds = torch.argmax(logits, dim=1)
-                correct_train += torch.sum(preds == labels[idx]).float()
+                correct_train += torch.sum(preds == labels).float()
                 loss = loss_fn(
-                    logits, labels[idx]
-                )  # + 0.1*(model.layer.alphas@model.layer.alphas.T - torch.eye(args.num_weights).to(args.device)).square().mean()
+                    logits, labels
+                )
                 loss.backward()
                 for name, param in model.named_parameters():
                     if param.grad is not None:
                         wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
-                for name, param in mlp.named_parameters():
-                    if param.grad is not None:
-                        wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
                 opt.step()
                 t_loss += loss.item()
-                del (X, logits, loss, preds)
+                del (logits, loss, preds)
                 torch.cuda.empty_cache()
                 gc.collect()
 
             train_acc = correct_train * 100 / len(train_idx)
-            test_acc = test(model, mlp, PCs, labels, test_loader)
+            test_acc = test(model, test_loader)
             wandb.log(
                 {
                     "Loss": t_loss,
@@ -119,23 +119,6 @@ def train(model, mlp, PCs, labels):
                 },
                 step=epoch + 1,
             )
-            # for k in range(len(model.layer.alphas)):
-            #     for d in range(len(model.layer.alphas[k])):
-            #         wandb.log({f'Alpha{k}_{d}':model.layer.alphas[k][d].item()}, step=epoch+1)
-            if test_acc > best_acc:
-                best_acc = test_acc
-                model_path = (
-                    args.raw_dir + f"/simplex_models/model_{args.num_weights}.pth"
-                )
-
-                # torch.save({
-                #     'epoch': epoch,  # Save the current epoch number
-                #     'model_state_dict': model.state_dict(),
-                #     'mlp_state_dict': mlp.state_dict(),
-                #     'optimizer_state_dict': opt.state_dict(),
-                #     'best_acc': best_acc,
-                #     'args': args
-                # }, model_path)
 
             tq.set_description(
                 "Train Loss = %.4f, Train acc = %.4f, Test acc = %.4f, Best acc = %.4f"
@@ -143,29 +126,31 @@ def train(model, mlp, PCs, labels):
             )
     print(f"Best accuracy : {best_acc}")
 
-
-if __name__ == "__main__":
+def main():
     import os
 
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
     wandb.init(project="pointcloud-net-k-fold", config=config)
-    
+
     PCs, labels, num_labels = load_data(args.raw_dir, args.full)
-    model = HiPoNet(
-        PCs[0].shape[1], args.num_weights, args.threshold, args.K, args.device
+    hiponet = HiPoNet(
+        PCs[0].shape[1],
+        args.num_weights,
+        args.threshold,
+        args.K,
+        args.device,
+        args.sigma,
     )
-    model = nn.DataParallel(model).to(args.device)
     with torch.no_grad():
-        input_dim = model([PCs[0].to(args.device)], 1).shape[1]
-    mlp = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(args.device)
-    model_path = f"saved_models/model_{args.raw_dir}_{args.num_weights}_persistence_prediction.pth"
+        input_dim = hiponet([PCs[0].to(args.device)]).shape[1]
+    mlp_classifier = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(
+        args.device
+    )
+    model = nn.DataParallel(nn.Sequential(hiponet, mlp_classifier))
+    from IPython import embed; embed()
+    return
+    train(model, PCs, labels)
 
-    # torch.save({
-    #     'model_state_dict': model.state_dict(),
-    #     'mlp_state_dict': mlp.state_dict(),
-    #     'best_acc': 0,
-    #     'args': args
-    # }, model_path)
-
-    train(model, mlp, PCs, labels)
+if __name__ == "__main__":
+    main()

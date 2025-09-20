@@ -386,7 +386,7 @@ class SimplicialFeatLearningLayerTetra(nn.Module):
         return features.view(B_pc, features.shape[1] * self.n_weights)
 
 class HiPoNet(nn.Module):
-    def __init__(self, dimension, n_weights, threshold, K, device):
+    def __init__(self, dimension, n_weights, threshold, K, device, sigma):
         super(HiPoNet, self).__init__()
         self.dimension = dimension
         if K == 1:
@@ -396,9 +396,10 @@ class HiPoNet(nn.Module):
         else:
             self.layer = SimplicialFeatLearningLayerTetra(n_weights, dimension, threshold, device)
         self.device = device
+        self.sigma = sigma
     
-    def forward(self, batch, sigma):
-        PSI = self.layer(batch, sigma)
+    def forward(self, batch):
+        PSI = self.layer(batch, self.sigma)
         return PSI
 
 class MLP(nn.Module):
