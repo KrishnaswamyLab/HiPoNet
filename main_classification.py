@@ -67,6 +67,7 @@ def test(model, loader):
     with torch.no_grad():
         for batch, labels in loader:
             logits = model(batch)
+            labels = labels.to(logits.device)
             preds = torch.argmax(logits, dim=1)
             correct += torch.sum(preds == labels).float()
             total += len(labels)
@@ -103,6 +104,7 @@ def train(model: nn.Module, PCs, labels):
             for batch, labels in train_loader:
                 opt.zero_grad()
                 logits = model(batch)
+                labels = labels.to(logits.device)
                 preds = torch.argmax(logits, dim=1)
                 correct_train += torch.sum(preds == labels).float()
                 loss = loss_fn(logits, labels)
