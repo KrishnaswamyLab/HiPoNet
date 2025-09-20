@@ -48,6 +48,17 @@ else:
     args.device = "cpu"
 
 
+def collate_fn(batch):
+    # We do this because DataParallel requires an explicit batch dimension
+    # So we need our data to be a tensor, but the different point clouds have different
+    # number of points, so we use nested tensors
+    data = torch.nested.as_nested_tensor(
+        [item[0] for item in batch], layout=torch.jagged
+    )
+    labels = torch.LongTensor([item[1] for item in batch])
+    return data, labels
+
+
 def test(model, loader):
     model.eval()
     correct = 0
@@ -69,23 +80,20 @@ def train(model: nn.Module, PCs, labels):
         weight_decay=args.wd,
     )
     train_idx, test_idx = train_test_split(np.arange(len(labels)), test_size=0.2)
-    # We do this because DataParallel requires an explicit batch dimension
-    # So we need our data to be a tensor, but the different point clouds have different 
-    # number of points, so we use nested tensors
-    train_data = torch.nested.as_nested_tensor(
-        [PCs[i] for i in train_idx], layout=torch.jagged
+    train_loader = DataLoader(
+        [(PCs[i], labels[i]) for i in train_idx],
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
     )
-    test_data = torch.nested.as_nested_tensor(
-        [PCs[i] for i in test_idx], layout=torch.jagged
+    test_loader = DataLoader(
+        [(PCs[i], labels[i]) for i in test_idx],
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
     )
-    train_labels = torch.LongTensor([labels[i] for i in train_idx])
-    test_labels = torch.LongTensor([labels[i] for i in test_idx])
-    train_dataset = torch.utils.data.TensorDataset(train_data, train_labels)
-    test_dataset = torch.utils.data.TensorDataset(test_data, test_labels)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
     loss_fn = torch.nn.CrossEntropyLoss()
-    best_acc = 0  # best_acc = test(model, mlp, PCs, labels, test_loader)
+    best_acc = 0
     with tqdm(range(args.num_epochs)) as tq:
         for epoch in tq:
             correct_train = 0
@@ -96,21 +104,25 @@ def train(model: nn.Module, PCs, labels):
                 logits = model(batch)
                 preds = torch.argmax(logits, dim=1)
                 correct_train += torch.sum(preds == labels).float()
-                loss = loss_fn(
-                    logits, labels
-                )
+                loss = loss_fn(logits, labels)
+                from IPython import embed
+
+                embed()
                 loss.backward()
-                for name, param in model.named_parameters():
-                    if param.grad is not None:
-                        wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
                 opt.step()
                 t_loss += loss.item()
                 del (logits, loss, preds)
                 torch.cuda.empty_cache()
                 gc.collect()
 
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
+
             train_acc = correct_train * 100 / len(train_idx)
             test_acc = test(model, test_loader)
+            if test_acc > best_acc:
+                best_acc = test_acc
             wandb.log(
                 {
                     "Loss": t_loss,
@@ -125,6 +137,7 @@ def train(model: nn.Module, PCs, labels):
                 % (t_loss, train_acc.item(), test_acc.item(), best_acc)
             )
     print(f"Best accuracy : {best_acc}")
+
 
 def main():
     import os
@@ -148,9 +161,8 @@ def main():
         args.device
     )
     model = nn.DataParallel(nn.Sequential(hiponet, mlp_classifier))
-    from IPython import embed; embed()
-    return
     train(model, PCs, labels)
+
 
 if __name__ == "__main__":
     main()
