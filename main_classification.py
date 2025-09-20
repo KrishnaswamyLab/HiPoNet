@@ -53,21 +53,27 @@ def collate_fn(batch):
     # We do this because DataParallel requires an explicit batch dimension
     # So we need our data to be a tensor, but the different point clouds have different
     # number of points, so we use nested tensors
+    # We also want to ensure each GPU gets a similar amount of data
+    # So we split the batch into two halves with similar number of points
+    if torch.cuda.device_count() <= 1:
+        left, right = batch, []
+    elif torch.cuda.device_count() == 2:
+        left, right = [], []
+        left_total, right_total = 0, 0
+        for x in batch:
+            if left_total <= right_total and len(left) < len(batch) // 2:
+                left.append(x)
+                left_total += x[0].shape[0]
+            else:
+                right.append(x)
+                right_total += x[0].shape[0]
+    else:
+        raise NotImplementedError("Only supports 1 or 2 GPUs")
 
-    # We sort by size because we want to ensure both GPUs get roughly equal amount of work
-    batch = sorted(batch, key=lambda x: x[0].shape[0])
-
-    data, labels = [], []
-    for i in range(len(batch) // 2):
-        x, label = batch.pop(0)
-        data.append(x)
-        labels.append(label)
-        x, label = batch.pop(-1)
-        data.append(x)
-        labels.append(label)
-
-    data = torch.nested.as_nested_tensor(data, layout=torch.jagged)
-    labels = torch.LongTensor(labels)
+    data = torch.nested.as_nested_tensor(
+        [x[0] for x in left] + [x[0] for x in right], layout=torch.jagged
+    )
+    labels = torch.LongTensor([x[1] for x in left] + [x[1] for x in right])
     return data, labels
 
 
