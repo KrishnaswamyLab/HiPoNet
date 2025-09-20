@@ -39,6 +39,7 @@ parser.add_argument("--wd", type=float, default=3e-3, help="Weight decay")
 parser.add_argument("--num_epochs", type=int, default=20, help="Number of epochs")
 parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
 parser.add_argument("--gpu", type=int, default=0, help="GPU index")
+parser.add_argument("--disable_wb", action="store_true", help="Disable wandb logging")
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -141,7 +142,7 @@ def main():
 
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
-    wandb.init(project="pointcloud-net-k-fold", config=config)
+    wandb.init(project="pointcloud-net-k-fold", config=config, mode="disabled" if args.disable_wb else None)
 
     PCs, labels, num_labels = load_data(args.raw_dir, args.full)
     hiponet = HiPoNet(
