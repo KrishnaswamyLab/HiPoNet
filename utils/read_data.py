@@ -83,17 +83,17 @@ def load_data_persistence(raw_dir, full):
     return PCs, labels, labels.shape[1]
 
 
-def load_data_ST(raw_dir, label_name):
+def load_data_ST(raw_dir: str, dataset: str, label_name: str):
+    raw_dir = raw_dir.rstrip("/")
     spatial_cords = torch.load(
-        f"ST_preprocessed/spatial_cords_{raw_dir}_{label_name}.pt"
+        f"{raw_dir}/spatial_cords_{dataset}_{label_name}.pt"
     )
     num_pcs = len(spatial_cords)
-    gene_expr = torch.load(f"ST_preprocessed/gene_expr_{raw_dir}_{label_name}.pt")
-    labels = torch.load(f"ST_preprocessed/labels_{raw_dir}_{label_name}.pt")
-    indices = torch.load(f"ST_preprocessed/indices_{raw_dir}_{label_name}.pt")
+    gene_expr = torch.load(f"{raw_dir}/gene_expr_{dataset}_{label_name}.pt")
+    labels = torch.load(f"{raw_dir}/labels_{dataset}_{label_name}.pt")
+    indices = torch.load(f"{raw_dir}/indices_{dataset}_{label_name}.pt")
     spatial_cords = [spatial_cords[i][indices[i]].float() for i in range(num_pcs)]
     gene_expr = [gene_expr[i][indices[i]].float() for i in range(num_pcs)]
-    gene_dim = gene_expr[0].shape[1]
 
     return spatial_cords, gene_expr, labels, 2
 
