@@ -43,7 +43,7 @@ parser.add_argument("--disable_wb", action="store_true", help="Disable wandb log
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
-    print(f"Using {args.gpu} GPUs")
+    print(f"Using {torch.cuda.device_count()} GPUs")
     args.device = "cuda"
 else:
     args.device = "cpu"
