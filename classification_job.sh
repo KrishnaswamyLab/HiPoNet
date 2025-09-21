@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=hiponet_classification
+#SBATCH --job-name=pcnet_cl
 #SBATCH --time=01:00:00
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=t.long@yale.edu

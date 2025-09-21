@@ -217,8 +217,8 @@ if __name__ == "__main__":
     )
     with torch.no_grad():
         input_dim = (
-            model_spatial([spaital_PCs[0].to(args.device)]).shape[1]
-            + model_gene([gene_PCs[0].to(args.device)]).shape[1]
+            model_spatial([spaital_PCs[0][:5].to(args.device)]).shape[1]
+            + model_gene([gene_PCs[0][:5].to(args.device)]).shape[1]
         )
     mlp = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(args.device)
     model_path = f"space_gm_model/model_{args.raw_dir}_{args.label_name}.pth"
