@@ -40,6 +40,12 @@ parser.add_argument("--num_epochs", type=int, default=20, help="Number of epochs
 parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
 parser.add_argument("--gpu", type=int, default=0, help="GPU index")
 parser.add_argument("--disable_wb", action="store_true", help="Disable wandb logging")
+parser.add_argument(
+    "--n_accumulate",
+    default=1,
+    type=int,
+    help="number of batches to accumulate gradients over",
+)
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -60,7 +66,7 @@ def collate_fn(batch):
         return torch.nested.as_nested_tensor(
             [x[0] for x in batch], layout=torch.jagged
         ), torch.LongTensor([x[1] for x in batch])
-    
+
     # We have n_gpus buckets, try and fill them up evenly
     max_per_bucket = len(batch) // n_gpus
     buckets = [[] for _ in range(n_gpus)]
@@ -70,7 +76,7 @@ def collate_fn(batch):
         buckets[min_idx].append(x)
         if len(buckets[min_idx]) == max_per_bucket:
             # Bucket is full, set score to infinity so we don't add any more
-            scores[min_idx] = float('inf')
+            scores[min_idx] = float("inf")
         else:
             # The 'score' is the number of points *squared* since the W matrix has N^2 entries
             scores[min_idx] += x[0].shape[0] ** 2
@@ -116,6 +122,7 @@ def train(model: nn.Module, PCs, labels):
         shuffle=False,
         collate_fn=collate_fn,
     )
+    total_n_batches = len(train_loader)
     loss_fn = torch.nn.CrossEntropyLoss()
     best_acc = 0
     with tqdm(range(args.num_epochs)) as tq:
@@ -123,16 +130,22 @@ def train(model: nn.Module, PCs, labels):
             correct_train = 0
             t_loss = 0
             model.train()
-            for batch, labels in train_loader:
-                opt.zero_grad()
+            opt.zero_grad()
+            minibatches_per_batch = args.n_accumulate
+            for i, (batch, labels) in enumerate(train_loader, start=1):
                 logits = model(batch)
                 labels = labels.to(logits.device)
                 preds = torch.argmax(logits, dim=1)
                 correct_train += torch.sum(preds == labels).detach().float().item()
-                loss = loss_fn(logits, labels)
-                loss.backward()
-                opt.step()
+                loss = loss_fn(logits, labels) / minibatches_per_batch
                 t_loss += loss.detach().item()
+                loss.backward()
+
+                if (i % args.n_accumulate == 0) or i == total_n_batches:
+                    opt.step()
+                    opt.zero_grad()
+                    minibatches_per_batch = min(args.n_accumulate, total_n_batches - i)
+                
                 del (logits, loss, preds)
                 torch.cuda.empty_cache()
                 gc.collect()
@@ -166,6 +179,7 @@ def main():
     import os
 
     assert args.batch_size % 2 == 0, "Batch size must be even"
+    args.effective_batch_size = args.batch_size * args.n_accumulate
 
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
