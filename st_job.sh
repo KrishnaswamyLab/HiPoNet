@@ -10,4 +10,4 @@
 source .venv/bin/activate
 uv run wandb login $WANDB_API_KEY
 echo "Starting ST regression job with arguments..." $@
-uv run main_ST.py --gpu=1 $@
+uv run main_ST.py --gpu=0 $@

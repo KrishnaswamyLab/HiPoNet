@@ -150,6 +150,7 @@ def train(model: nn.Module, PCs, labels):
                     "Loss": t_loss,
                     "Train acc": train_acc,
                     "Test acc": test_acc,
+                    "Best acc": best_acc,
                 },
                 step=epoch + 1,
             )
