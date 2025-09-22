@@ -4,7 +4,7 @@
 #SBATCH --time=01:00:00
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=t.long@yale.edu
-#SBATCH --gpus=h200:1
+#SBATCH --gpus=h200:2
 #SBATCH --partition=gpu_h200
 
 source .venv/bin/activate
