@@ -46,6 +46,11 @@ parser.add_argument(
     type=int,
     help="number of batches to accumulate gradients over",
 )
+parser.add_argument(
+    "--orthogonal",
+    action="store_true",
+    help="If set, use orthogonality loss on the alpha parameter",
+)
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -137,7 +142,19 @@ def train(model: nn.Module, PCs, labels):
                 labels = labels.to(logits.device)
                 preds = torch.argmax(logits, dim=1)
                 correct_train += torch.sum(preds == labels).detach().float().item()
-                loss = loss_fn(logits, labels) / minibatches_per_batch
+                loss = loss_fn(logits, labels)
+                if args.orthogonal:
+                    alphas = model.module[0].layer.alphas
+                    loss += (
+                        0.1
+                        * (
+                            alphas @ alphas.T
+                            - torch.eye(args.num_weights).to(args.device)
+                        )
+                        .square()
+                        .mean()
+                    )
+                loss /= minibatches_per_batch
                 t_loss += loss.detach().item()
                 loss.backward()
 
@@ -145,7 +162,7 @@ def train(model: nn.Module, PCs, labels):
                     opt.step()
                     opt.zero_grad()
                     minibatches_per_batch = min(args.n_accumulate, total_n_batches - i)
-                
+
                 del (logits, loss, preds)
                 torch.cuda.empty_cache()
                 gc.collect()
