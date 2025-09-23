@@ -120,7 +120,7 @@ if __name__ == '__main__':
     model = HiPoNet(PCs[0].shape[1], args.num_weights, args.threshold, args.K, args.device)
     model = nn.DataParallel(model).to(args.device)
     with torch.no_grad():
-        input_dim = model([PCs[0].to(args.device)], 1).shape[1]
+        input_dim = model([PCs[0].to(args.device)], args.sigma).shape[1]
     mlp = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(args.device)
     model_path = f"saved_models/model_{args.raw_dir}_{args.num_weights}_persistence_prediction.pth"
 
