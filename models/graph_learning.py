@@ -420,3 +420,14 @@ class MLP(nn.Module):
         for i in range(len(self.layers)-1):
             X = F.relu(self.layers[i](X))
         return (self.layers[-1](X))
+    
+class MLPAutoEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, embedding_dim, num_layers):
+        self.encoder = MLP(input_dim, hidden_dim, embedding_dim, num_layers)
+        self.decoder = MLP(embedding_dim, hidden_dim, input_dim, num_layers)
+
+    def encode(self, X):
+        return F.relu(self.encoder(X))
+    
+    def decode(self, X):
+        return self.decoder(X)
