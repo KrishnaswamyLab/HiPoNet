@@ -44,3 +44,4 @@ LICENSE.md
 *.out
 *.pth
 *scratch.*
+data/*
