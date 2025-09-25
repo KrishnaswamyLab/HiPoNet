@@ -4,9 +4,10 @@ import torch.nn as nn
 from torch_geometric.nn import MessagePassing
 from torch_geometric.nn import global_mean_pool
 
+
 class WeightedSumConv(MessagePassing):
     def __init__(self):
-        super().__init__(aggr='add')
+        super().__init__(aggr="add")
 
     def forward(self, x, edge_index, edge_weight):
         return self.propagate(edge_index, x=x, edge_weight=edge_weight)
@@ -16,7 +17,7 @@ class WeightedSumConv(MessagePassing):
 
 
 class GraphWaveletTransform(nn.Module):
-    def __init__(self, edge_index, edge_weight, X, J, device):
+    def __init__(self, edge_index, edge_weight, X, J, device, pooling: bool = True):
         super().__init__()
         self.device = device
         # We'll store the graph
@@ -29,6 +30,7 @@ class GraphWaveletTransform(nn.Module):
         self.num_feats = self.X_init.size(1)
 
         self.max_scale = 2 ** (J - 1)
+        self.pooling = pooling
 
     def diffuse(self, x=None):
         if x is None:
@@ -43,7 +45,13 @@ class GraphWaveletTransform(nn.Module):
         return out_list
 
     def first_order_feature(self, diff_list):
-        F1 = torch.cat([torch.abs(diff_list[i-1]- diff_list[i]) for i in range(1, len(diff_list))],1)
+        F1 = torch.cat(
+            [
+                torch.abs(diff_list[i - 1] - diff_list[i])
+                for i in range(1, len(diff_list))
+            ],
+            1,
+        )
         return F1
 
     def second_order_feature(self, diff_list):
@@ -53,25 +61,31 @@ class GraphWaveletTransform(nn.Module):
         results = []
         for j in range(self.J):
             col_start = j * self.num_feats
-            col_end   = (j + 1) * self.num_feats
-            for j_prime in range(j+1, self.J):
-                block_jp   = U_diff_list[j_prime][:, col_start:col_end]
-                block_jp_1 = U_diff_list[j_prime-1][:, col_start:col_end]
+            col_end = (j + 1) * self.num_feats
+            for j_prime in range(j + 1, self.J):
+                block_jp = U_diff_list[j_prime][:, col_start:col_end]
+                block_jp_1 = U_diff_list[j_prime - 1][:, col_start:col_end]
                 results.append(torch.abs(block_jp - block_jp_1))
         return torch.cat(results, dim=1)
 
     def generate_timepoint_features(self, batch):
-        diff_list = self.diffuse()   
+        diff_list = self.diffuse()
         F0 = diff_list[-1]
         F1 = self.first_order_feature(diff_list)
         F2 = self.second_order_feature(diff_list)
         feats = torch.cat([F0, F1, F2], dim=1)
 
-        return global_mean_pool(feats, batch)
+        if self.pooling:
+            feats = global_mean_pool(feats, batch)
+
+        return feats
 
     def diffusion_only(self, batch):
         diff_list = self.diffuse()  # list of length J
-        
+
         feats = torch.cat(diff_list, dim=1)
-        
-        return global_mean_pool(feats, batch)
+
+        if self.pooling:
+            feats = global_mean_pool(feats, batch)
+
+        return feats
