@@ -77,6 +77,7 @@ def train(
             opt.zero_grad()
 
             X_spatial, X_gene = model_spatial([PC_spatial]), model_gene([PC_gene])
+            # Embedding of shape (n_nodes, n_spatial_embedding_dims + n_gene_embedding_dims)
             embedding = torch.cat([X_spatial, X_gene], 1)
             reconstructed = autoenc(embedding)
             loss = loss_fn(embedding, reconstructed)
@@ -112,7 +113,7 @@ def main():
         mode="disabled" if args.disable_wb else None,
     )
 
-    PC_spatial, PC_gene, labels, num_labels = load_data(args.raw_dir, args.full)
+    PC_gene, PC_spatial, labels, num_labels = load_data(args.raw_dir, args.full)
     model_spatial = (
         HiPoNet(
             dimension=PC_spatial.shape[1],
