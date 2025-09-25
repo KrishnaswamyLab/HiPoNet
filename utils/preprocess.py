@@ -2,6 +2,8 @@ import scanpy as sc
 import numpy as np
 import pathlib
 from glob import glob
+import torch
+from sklearn.preprocessing import StandardScaler
 
 file = glob("data/sea_raw/*")[0]
 file_name = file.split("/")[-1][:-5]
@@ -19,5 +21,7 @@ sc.pp.filter_genes(adata, min_cells=3)
 sc.pp.normalize_total(adata, target_sum=1e4)
 sc.pp.log1p(adata)
 
-np.save(f"data/sea_matrix/{file_name}.npy", adata.X)
-np.save(f"data/sea_spatial/{file_name}.npy", adata.obsm["X_spatial_raw"])
+X = torch.tensor(StandardScaler().fit_transform(adata.X), dtype=torch.float)
+torch.save(X, f"data/sea_matrix/{file_name}.pt",)
+X_spatial = torch.tensor(StandardScaler().fit_transform(adata.obsm["X_spatial_raw"]), dtype=torch.float)
+torch.save(X_spatial, f"data/sea_spatial/{file_name}.pt")
