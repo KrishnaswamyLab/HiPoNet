@@ -73,11 +73,11 @@ def load_data(raw_dir, full):
         X = []
         X_spatial = []
         labels = []
-        for file in pathlib.Path(raw_dir + "_matrix/").iterdir():
+        for file in pathlib.Path(raw_dir + "_matrix/").glob("*.pt"):
             X.append(torch.load(file))
-        for file in pathlib.Path(raw_dir + "_spatial/").iterdir():
+        for file in pathlib.Path(raw_dir + "_spatial/").glob("*.pt"):
             X_spatial.append(torch.load(file))
-        for file in pathlib.Path(raw_dir + "_braak_labels/").iterdir():
+        for file in pathlib.Path(raw_dir + "_braak_labels/").glob("*.npy"):
             labels.append(np.load(file, allow_pickle=True))
 
         le = LabelEncoder()
