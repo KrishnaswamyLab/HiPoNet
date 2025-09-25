@@ -33,6 +33,8 @@ class GraphFeatLearningLayer(nn.Module):
         self.device = device
         self.pooling = pooling
 
+        assert self.pooling or (self.n_weights == 1), "n_weights > 1 not supported without pooling"
+
     def forward(self, point_clouds, sigma):
         B_pc = len(point_clouds)
         d = point_clouds[0].shape[1]
@@ -93,7 +95,9 @@ class GraphFeatLearningLayer(nn.Module):
         gwt = GraphWaveletTransform(edge_index, edge_weight, X_cat, J, self.device, self.pooling)
 
         features = gwt.diffusion_only(batch)
-        return features.view(B_pc, features.shape[1] * self.n_weights)
+        if self.pooling:
+            features = features.view(B_pc, features.shape[1] * self.n_weights)
+        return features
 
 
 class SimplicialFeatLearningLayerTri(nn.Module):
