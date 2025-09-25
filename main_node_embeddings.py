@@ -115,24 +115,24 @@ def main():
     PC_spatial, PC_gene, labels, num_labels = load_data(args.raw_dir, args.full)
     model_spatial = (
         HiPoNet(
-            PC_spatial.shape[1],
-            args.num_weights,
-            args.spatial_threshold,
-            args.num_weights,
-            args.device,
-            args.sigma,
+            dimension=PC_spatial[0].shape[1],
+            num_weights=1,
+            threshold=args.gene_threshold,
+            K=args.K,
+            device=args.device,
+            sigma=args.sigma,
         )
         .to(args.device)
         .float()
     )
     model_gene = (
         HiPoNet(
-            PC_gene.shape[1],
-            args.num_weights,
-            args.gene_threshold,
-            args.num_weights,
-            args.device,
-            args.sigma,
+            dimension=PC_gene[0].shape[1],
+            num_weights=1,
+            threshold=args.gene_threshold,
+            K=args.K,
+            device=args.device,
+            sigma=args.sigma,
         )
         .to(args.device)
         .float()

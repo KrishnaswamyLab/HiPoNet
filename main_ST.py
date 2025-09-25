@@ -193,24 +193,24 @@ if __name__ == "__main__":
     # spaital_PCs, gene_PCs, labels, num_labels = load_data_ST_melanoma(args.raw_dir)
     model_spatial = (
         HiPoNet(
-            spaital_PCs[0].shape[1],
-            args.num_weights,
-            args.spatial_threshold,
-            args.num_weights,
-            args.device,
-            args.sigma,
+            dimension=spaital_PCs[0].shape[1],
+            num_weights=1,
+            threshold=args.spatial_threshold,
+            K=args.K,
+            device=args.device,
+            sigma=args.sigma,
         )
         .to(args.device)
         .float()
     )
     model_gene = (
         HiPoNet(
-            gene_PCs[0].shape[1],
-            args.num_weights,
-            args.gene_threshold,
-            args.num_weights,
-            args.device,
-            args.sigma,
+            dimension=gene_PCs[0].shape[1],
+            num_weights=1,
+            threshold=args.gene_threshold,
+            K=args.K,
+            device=args.device,
+            sigma=args.sigma,
         )
         .to(args.device)
         .float()
