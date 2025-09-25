@@ -7,6 +7,8 @@ from models.graph_learning import HiPoNet, MLPAutoEncoder
 from argparse import ArgumentParser
 
 import gc
+import os
+SMOKE_TEST = os.environ.get("SMOKE_TEST")
 
 gc.enable()
 
@@ -15,14 +17,20 @@ parser = ArgumentParser(description="Pointcloud net")
 parser.add_argument(
     "--raw_dir",
     type=str,
-    default="COVID_data",
+    default="data/sea",
     help="Directory where the raw data is stored",
 )
 parser.add_argument("--full", action="store_true")
 parser.add_argument("--task", type=str, default="prolif", help="Task on PDO data")
 parser.add_argument("--num_weights", type=int, default=2, help="Number of weights")
 parser.add_argument(
-    "--threshold", type=float, default=0.5, help="Threshold for creating the graph"
+    "--spatial_threshold",
+    type=float,
+    default=0.5,
+    help="Threshold for creating the graph",
+)
+parser.add_argument(
+    "--gene_threshold", type=float, default=0.5, help="Threshold for creating the graph"
 )
 parser.add_argument("--sigma", type=float, default=0.5, help="Bandwidth")
 parser.add_argument("--K", type=int, default=1, help="Order of simplicial complex")
@@ -45,48 +53,42 @@ else:
     args.device = "cpu"
 
 
-def test(model, loader):
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for batch, labels in loader:
-            logits = model(batch)
-            labels = labels.to(logits.device)
-            preds = torch.argmax(logits, dim=1)
-            correct += torch.sum(preds == labels).detach().float().item()
-            total += len(labels)
-    return (correct * 100) / total
-
-
-def train(hiponet: HiPoNet, autoenc: MLPAutoEncoder, PC, node_labels):
+def train(
+    model_gene: HiPoNet,
+    model_spatial: HiPoNet,
+    autoenc: MLPAutoEncoder,
+    PC_gene: torch.tensor,
+    PC_spatial: torch.tensor,
+):
     print(args)
     opt = torch.optim.AdamW(
-        list(hiponet.parameters()) + list(autoenc.parameters()),
+        list(model_gene.parameters())
+        + list(model_spatial.parameters())
+        + list(autoenc.parameters()),
         lr=args.lr,
         weight_decay=args.wd,
     )
     loss_fn = torch.nn.MSELoss()
     with tqdm(range(args.num_epochs)) as tq:
         for epoch in tq:
-            hiponet.train()
+            model_gene.train()
+            model_spatial.train()
             autoenc.train()
             opt.zero_grad()
 
-            hiponet_embedding = hiponet(PC)
-            reconstructed = autoenc(hiponet)
-            loss = loss_fn(hiponet_embedding, reconstructed)
+            X_spatial, X_gene = model_spatial([PC_spatial]), model_gene([PC_gene])
+            embedding = torch.cat([X_spatial, X_gene], 1)
+            reconstructed = autoenc(embedding)
+            loss = loss_fn(embedding, reconstructed)
             loss.backward()
 
             torch.cuda.empty_cache()
             gc.collect()
 
-            for name, param in hiponet.named_parameters():
-                if param.grad is not None:
-                    wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
-            for name, param in autoenc.named_parameters():
-                if param.grad is not None:
-                    wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
+            for model in [model_spatial, model_gene, autoenc]:
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
 
             loss_float = loss.detach().item()
             wandb.log(
@@ -102,9 +104,6 @@ def train(hiponet: HiPoNet, autoenc: MLPAutoEncoder, PC, node_labels):
 def main():
     import os
 
-    assert args.batch_size % 2 == 0, "Batch size must be even"
-    args.effective_batch_size = args.batch_size * args.n_accumulate
-
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
     wandb.init(
@@ -113,21 +112,42 @@ def main():
         mode="disabled" if args.disable_wb else None,
     )
 
-    PCs, labels, num_labels = load_data(args.raw_dir, args.full)
-    hiponet = HiPoNet(
-        PCs[0].shape[1],
-        args.num_weights,
-        args.threshold,
-        args.K,
-        args.device,
-        args.sigma,
+    PC_spatial, PC_gene, labels, num_labels = load_data(args.raw_dir, args.full)
+    model_spatial = (
+        HiPoNet(
+            PC_spatial.shape[1],
+            args.num_weights,
+            args.spatial_threshold,
+            args.num_weights,
+            args.device,
+            args.sigma,
+        )
+        .to(args.device)
+        .float()
+    )
+    model_gene = (
+        HiPoNet(
+            PC_gene.shape[1],
+            args.num_weights,
+            args.gene_threshold,
+            args.num_weights,
+            args.device,
+            args.sigma,
+        )
+        .to(args.device)
+        .float()
     )
     with torch.no_grad():
-        input_dim = hiponet(PCs[0].to(args.device)[None, ...]).shape[1]
+        input_dim = (
+            model_spatial([PC_spatial[:5].to(args.device)]).shape[1]
+            + model_gene([PC_gene[:5].to(args.device)]).shape[1]
+        )
+    if SMOKE_TEST:
+        PC_gene, PC_spatial = PC_gene[:100], PC_spatial[:100]
     autoencoder = MLPAutoEncoder(
         input_dim, args.hidden_dim, num_labels, args.num_layers
     ).to(args.device)
-    train(hiponet, autoencoder, PCs, labels)
+    train(model_gene, model_spatial, autoencoder, PC_gene, PC_spatial)
 
 
 if __name__ == "__main__":

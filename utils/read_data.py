@@ -8,6 +8,7 @@ from sklearn.preprocessing import StandardScaler
 import numpy as np
 from tqdm import tqdm
 import pandas as pd
+import pathlib
 
 
 def load_data(raw_dir, full):
@@ -68,6 +69,24 @@ def load_data(raw_dir, full):
         PCs = [PCs[i] for i in keep]
         labels = [labels[i] for i in keep]
         num_labels = len(np.unique(labels))
+    elif data_name == "sea":
+        X = []
+        X_spatial = []
+        labels = []
+        for file in pathlib.Path(raw_dir + "_matrix/").iterdir():
+            X.append(torch.load(file))
+        for file in pathlib.Path(raw_dir + "_spatial/").iterdir():
+            X_spatial.append(torch.load(file))
+        for file in pathlib.Path(raw_dir + "_braak_labels/").iterdir():
+            labels.append(np.load(file, allow_pickle=True))
+
+        le = LabelEncoder()
+        return (
+            torch.concat(X),
+            torch.concat(X_spatial),
+            torch.tensor(le.fit_transform(np.concat(labels))),
+            np.unique(np.concat(labels)).shape[0]
+        )
     else:
         raise ValueError(f"Dataset {data_name} not recognized.")
     return PCs, labels, num_labels
@@ -85,9 +104,7 @@ def load_data_persistence(raw_dir, full):
 
 def load_data_ST(raw_dir: str, dataset: str, label_name: str):
     raw_dir = raw_dir.rstrip("/")
-    spatial_cords = torch.load(
-        f"{raw_dir}/spatial_cords_{dataset}_{label_name}.pt"
-    )
+    spatial_cords = torch.load(f"{raw_dir}/spatial_cords_{dataset}_{label_name}.pt")
     num_pcs = len(spatial_cords)
     gene_expr = torch.load(f"{raw_dir}/gene_expr_{dataset}_{label_name}.pt")
     labels = torch.load(f"{raw_dir}/labels_{dataset}_{label_name}.pt")

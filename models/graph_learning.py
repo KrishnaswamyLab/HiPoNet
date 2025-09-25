@@ -423,6 +423,7 @@ class MLP(nn.Module):
     
 class MLPAutoEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, embedding_dim, num_layers):
+        super(MLPAutoEncoder, self).__init__()
         self.encoder = MLP(input_dim, hidden_dim, embedding_dim, num_layers)
         self.decoder = MLP(embedding_dim, hidden_dim, input_dim, num_layers)
 
@@ -431,3 +432,6 @@ class MLPAutoEncoder(nn.Module):
     
     def decode(self, X):
         return self.decoder(X)
+
+    def forward(self, X):
+        return self.decoder(self.encoder(X))
