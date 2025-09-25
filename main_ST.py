@@ -194,7 +194,7 @@ if __name__ == "__main__":
     model_spatial = (
         HiPoNet(
             dimension=spaital_PCs[0].shape[1],
-            num_weights=1,
+            n_weights=1,
             threshold=args.spatial_threshold,
             K=args.K,
             device=args.device,
@@ -206,7 +206,7 @@ if __name__ == "__main__":
     model_gene = (
         HiPoNet(
             dimension=gene_PCs[0].shape[1],
-            num_weights=1,
+            n_weights=1,
             threshold=args.gene_threshold,
             K=args.K,
             device=args.device,
