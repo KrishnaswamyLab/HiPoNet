@@ -472,7 +472,7 @@ class SimplicialFeatLearningLayerTetra(nn.Module):
 
 
 class HiPoNet(nn.Module):
-    def __init__(self, dimension, n_weights, threshold, K, device, sigma, pooling):
+    def __init__(self, dimension, n_weights, threshold, K, device, sigma, pooling=True):
         super(HiPoNet, self).__init__()
         self.dimension = dimension
         if K == 1:
