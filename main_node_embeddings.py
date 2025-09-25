@@ -8,6 +8,7 @@ from argparse import ArgumentParser
 
 import gc
 import os
+
 SMOKE_TEST = os.environ.get("SMOKE_TEST")
 
 gc.enable()
@@ -22,7 +23,6 @@ parser.add_argument(
 )
 parser.add_argument("--full", action="store_true")
 parser.add_argument("--task", type=str, default="prolif", help="Task on PDO data")
-parser.add_argument("--num_weights", type=int, default=2, help="Number of weights")
 parser.add_argument(
     "--spatial_threshold",
     type=float,
@@ -121,6 +121,7 @@ def main():
             K=args.K,
             device=args.device,
             sigma=args.sigma,
+            pooling=False,
         )
         .to(args.device)
         .float()
@@ -133,6 +134,7 @@ def main():
             K=args.K,
             device=args.device,
             sigma=args.sigma,
+            pooling=False,
         )
         .to(args.device)
         .float()
@@ -145,7 +147,7 @@ def main():
     if SMOKE_TEST:
         PC_gene, PC_spatial = PC_gene[:100], PC_spatial[:100]
     autoencoder = MLPAutoEncoder(
-        input_dim, args.hidden_dim, num_labels, args.num_layers
+        input_dim, args.hidden_dim, num_labels, args.num_layers, bn=False
     ).to(args.device)
     train(model_gene, model_spatial, autoencoder, PC_gene, PC_spatial)
 
