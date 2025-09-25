@@ -16,3 +16,6 @@ For unsupervised cell-level embedding
 - Use autoencoder with reconstructive loss
 
 Should we try looking at PC.T matrix for point-cloud level embedding? 
+
+# TODO
+- change diffusion to timepoint
