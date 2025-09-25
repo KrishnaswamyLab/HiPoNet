@@ -5,8 +5,12 @@ description = "Neural Net for high-dimensional point cloud data."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "igraph>=0.11.9",
+    "leidenalg>=0.10.2",
     "libauc>=1.4.0",
+    "magic-impute>=3.0.0",
     "numpy>=2.3.2",
+    "scanpy>=1.11.4",
     "scikit-learn>=1.7.1",
     "torch>=2.8.0",
     "torchinfo>=1.8.0",
