@@ -33,7 +33,9 @@ class GraphFeatLearningLayer(nn.Module):
         self.device = device
         self.pooling = pooling
 
-        assert self.pooling or (self.n_weights == 1), "n_weights > 1 not supported without pooling"
+        assert self.pooling or (self.n_weights == 1), (
+            "n_weights > 1 not supported without pooling"
+        )
 
     def forward(self, point_clouds, sigma):
         B_pc = len(point_clouds)
@@ -70,7 +72,9 @@ class GraphFeatLearningLayer(nn.Module):
                     torch.cat(
                         [
                             torch.stack([row_offset, col_offset], dim=0),
-                            torch.arange(W.shape[0]).repeat(2, 1).to(W.device),
+                            (node_offset + torch.arange(W.shape[0]).repeat(2, 1)).to(
+                                W.device
+                            ),
                         ],
                         1,
                     )
@@ -94,7 +98,7 @@ class GraphFeatLearningLayer(nn.Module):
         J = 3
         gwt = GraphWaveletTransform(edge_index, edge_weight, X_cat, J, self.device, self.pooling)
 
-        features = gwt.diffusion_only(batch)
+        features = gwt.generate_timepoint_features(batch)
         if self.pooling:
             features = features.view(B_pc, features.shape[1] * self.n_weights)
         return features
