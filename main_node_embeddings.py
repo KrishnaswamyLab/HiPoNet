@@ -1,10 +1,13 @@
 import torch
 from tqdm import tqdm
 import wandb
-from utils.read_data import load_data
+from torch.utils.data import DataLoader
+from sklearn.model_selection import train_test_split
+import numpy as np
 
 from models.graph_learning import HiPoNet, MLPAutoEncoder
 from argparse import ArgumentParser
+from utils.read_data import load_data
 
 import gc
 import os
@@ -35,7 +38,10 @@ parser.add_argument(
 parser.add_argument("--sigma", type=float, default=0.5, help="Bandwidth")
 parser.add_argument("--K", type=int, default=1, help="Order of simplicial complex")
 parser.add_argument(
-    "--hidden_dim", type=int, default=256, help="Hidden dim for the MLP"
+    "--hidden_dim", type=int, default=256, help="Hidden dim for the MLP Autoencoder"
+)
+parser.add_argument(
+    "--embedding_dim", type=int, default=4, help="Autoencoder embedding dimension"
 )
 parser.add_argument("--num_layers", type=int, default=3, help="Number of MLP layers")
 parser.add_argument("--lr", type=float, default=0.01, help="Learning Rate")
@@ -44,6 +50,12 @@ parser.add_argument("--num_epochs", type=int, default=20, help="Number of epochs
 parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
 parser.add_argument("--gpu", type=int, default=0, help="GPU index")
 parser.add_argument("--disable_wb", action="store_true", help="Disable wandb logging")
+parser.add_argument(
+    "--n_accumulate",
+    default=1,
+    type=int,
+    help="number of batches to accumulate gradients over",
+)
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -51,6 +63,66 @@ if args.gpu != -1 and torch.cuda.is_available():
     args.device = "cuda"
 else:
     args.device = "cpu"
+
+
+def collate_fn(batch):
+    # We do this because DataParallel requires an explicit batch dimension
+    # So we need our data to be a tensor, but the different point clouds have different
+    # number of points, so we use nested tensors
+    # We also want to ensure each GPU gets a similar amount of data
+    # So we split the batch into segments which should have roughly even amount of data.
+    n_gpus = torch.cuda.device_count()
+    if n_gpus == 0:
+        return torch.nested.as_nested_tensor(
+            [x[0] for x in batch], layout=torch.jagged
+        ), torch.nested.as_nested_tensor([x[1] for x in batch], layout=torch.jagged)
+
+    # We have n_gpus buckets, try and fill them up evenly
+    max_per_bucket = len(batch) // n_gpus
+    buckets = [[] for _ in range(n_gpus)]
+    scores = [0 for _ in range(n_gpus)]
+    for x in batch:
+        min_idx = scores.index(min(scores))
+        buckets[min_idx].append(x)
+        if len(buckets[min_idx]) == max_per_bucket:
+            # Bucket is full, set score to infinity so we don't add any more
+            scores[min_idx] = float("inf")
+        else:
+            # The 'score' is the number of points *squared* since the W matrix has N^2 entries
+            scores[min_idx] += x[0].shape[0] ** 2
+
+    gene = torch.nested.as_nested_tensor(
+        [x[0] for bucket in buckets for x in bucket], layout=torch.jagged
+    )
+    spatial = torch.nested.as_nested_tensor(
+        [x[0] for bucket in buckets for x in bucket], layout=torch.jagged
+    )
+    return gene, spatial
+
+
+def test(
+    model_gene: HiPoNet,
+    model_spatial: HiPoNet,
+    autoenc: MLPAutoEncoder,
+    test_loader: DataLoader,
+):
+    model_gene.eval(), model_spatial.eval(), autoenc.eval()
+    loss_fn = torch.nn.MSELoss(reduction="sum")
+    total_loss = 0
+    total_nodes = 0
+    with torch.no_grad():
+        for batch_gene, batch_spatial in test_loader:
+            X_spatial, X_gene = model_spatial(batch_spatial), model_gene(batch_gene)
+            # Embedding of shape (n_nodes, n_spatial_embedding_dims + n_gene_embedding_dims)
+            embedding = torch.cat([X_spatial, X_gene], 1)
+            reconstructed = autoenc(embedding)
+            loss = loss_fn(embedding, reconstructed)
+            total_loss += loss.detach()
+            total_nodes += len(reconstructed)
+            torch.cuda.empty_cache()
+            gc.collect()
+
+    return total_loss / (total_nodes * embedding.shape[1])
 
 
 def train(
@@ -68,20 +140,46 @@ def train(
         lr=args.lr,
         weight_decay=args.wd,
     )
+    train_idx, test_idx = train_test_split(np.arange(len(PC_gene)), test_size=0.2)
+    train_loader = DataLoader(
+        [(PC_gene[i], PC_spatial[i]) for i in train_idx],
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+    )
+    test_loader = DataLoader(
+        [(PC_gene[i], PC_spatial[i]) for i in test_idx],
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+    )
     loss_fn = torch.nn.MSELoss()
+    total_n_batches = len(train_loader)
     with tqdm(range(args.num_epochs)) as tq:
         for epoch in tq:
             model_gene.train()
             model_spatial.train()
             autoenc.train()
             opt.zero_grad()
+            minibatches_per_batch = args.n_accumulate
+            for i, (batch_gene, batch_spatial) in enumerate(train_loader, start=1):
+                X_spatial, X_gene = model_spatial(batch_spatial), model_gene(batch_gene)
+                # Embedding of shape (n_nodes, n_spatial_embedding_dims + n_gene_embedding_dims)
+                embedding = torch.cat([X_spatial, X_gene], 1)
+                reconstructed = autoenc(embedding)
+                loss = loss_fn(embedding, reconstructed) / minibatches_per_batch
+                loss.backward()
 
-            X_spatial, X_gene = model_spatial([PC_spatial]), model_gene([PC_gene])
-            # Embedding of shape (n_nodes, n_spatial_embedding_dims + n_gene_embedding_dims)
-            embedding = torch.cat([X_spatial, X_gene], 1)
-            reconstructed = autoenc(embedding)
-            loss = loss_fn(embedding, reconstructed)
-            loss.backward()
+                if (i % args.n_accumulate == 0) or i == total_n_batches:
+                    opt.step()
+                    opt.zero_grad()
+                    minibatches_per_batch = min(args.n_accumulate, total_n_batches - i)
+
+                del (embedding, reconstructed)
+                torch.cuda.empty_cache()
+                gc.collect()
+
+            test_loss = test(model_gene, model_spatial, autoenc, test_loader)
 
             torch.cuda.empty_cache()
             gc.collect()
@@ -94,12 +192,15 @@ def train(
             loss_float = loss.detach().item()
             wandb.log(
                 {
-                    "Loss": loss_float,
+                    "train_loss": loss_float,
+                    "test_loss": test_loss,
                 },
                 step=epoch + 1,
             )
 
-            tq.set_description(f"Train Loss = {loss_float:.4f}")
+            tq.set_description(
+                f"Train Loss = {loss_float:.4f}, Test Loss = {test_loss:.4f}"
+            )
 
 
 def main():
@@ -108,15 +209,15 @@ def main():
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
     wandb.init(
-        project="pointcloud-net-k-fold",
+        project="pointcloud-net-node-embeddings",
         config=config,
         mode="disabled" if args.disable_wb else None,
     )
 
-    PC_gene, PC_spatial, labels, num_labels = load_data(args.raw_dir, args.full)
+    PC_gene, PC_spatial = load_data(args.raw_dir, args.full)
     model_spatial = (
         HiPoNet(
-            dimension=PC_spatial.shape[1],
+            dimension=PC_spatial[0].shape[1],
             n_weights=1,
             threshold=args.gene_threshold,
             K=args.K,
@@ -129,7 +230,7 @@ def main():
     )
     model_gene = (
         HiPoNet(
-            dimension=PC_gene.shape[1],
+            dimension=PC_gene[0].shape[1],
             n_weights=1,
             threshold=args.gene_threshold,
             K=args.K,
@@ -142,13 +243,16 @@ def main():
     )
     with torch.no_grad():
         input_dim = (
-            model_spatial([PC_spatial[:5].to(args.device)]).shape[1]
-            + model_gene([PC_gene[:5].to(args.device)]).shape[1]
+            model_spatial([PC_spatial[0][:5].to(args.device)]).shape[1]
+            + model_gene([PC_gene[0][:5].to(args.device)]).shape[1]
         )
     if SMOKE_TEST:
-        PC_gene, PC_spatial = PC_gene[:100], PC_spatial[:100]
+        PC_gene, PC_spatial = (
+            [PC_gene[i][:100] for i in range(20)],
+            [PC_spatial[i][:100] for i in range(20)],
+        )
     autoencoder = MLPAutoEncoder(
-        input_dim, args.hidden_dim, num_labels, args.num_layers, bn=False
+        input_dim, args.hidden_dim, args.embedding_dim, args.num_layers, bn=False
     ).to(args.device)
     train(model_gene, model_spatial, autoencoder, PC_gene, PC_spatial)
 

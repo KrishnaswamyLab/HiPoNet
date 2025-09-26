@@ -77,16 +77,7 @@ def load_data(raw_dir, full):
             X.append(torch.load(file))
         for file in pathlib.Path(raw_dir + "_spatial/").glob("*.pt"):
             X_spatial.append(torch.load(file))
-        for file in pathlib.Path(raw_dir + "_braak_labels/").glob("*.npy"):
-            labels.append(np.load(file, allow_pickle=True))
-
-        le = LabelEncoder()
-        return (
-            torch.concat(X),
-            torch.concat(X_spatial),
-            torch.tensor(le.fit_transform(np.concat(labels))),
-            np.unique(np.concat(labels)).shape[0]
-        )
+        return X, X_spatial
     else:
         raise ValueError(f"Dataset {data_name} not recognized.")
     return PCs, labels, num_labels
