@@ -19,3 +19,8 @@ Should we try looking at PC.T matrix for point-cloud level embedding?
 
 # TODO
 - change diffusion to timepoint
+- sections: take 3 different tissues from the brain 
+    - create different point clouds for each section
+    - we get around ~70 point clouds across whole SEA dataset
+    - want to train node embedding autoencoder over all these point clouds.
+    - each file in Hiren upload is a separate section, need to preprocess each
