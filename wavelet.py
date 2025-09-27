@@ -1,16 +1,23 @@
 import argparse
 import torch
 import torch.nn as nn
-from copy import deepcopy
 
 from torch_geometric.nn import MessagePassing
 from torch_geometric.nn import global_mean_pool
+
+from utils.read_data import load_data
 
 parser = argparse.ArgumentParser()
 args = parser.parse_args()
 args.n_weights = 2
 args.threshold = 0.15
 args.sigma = 10
+
+if torch.cuda.is_available():
+    args.device = "cuda"
+else:
+    args.device = "cpu"
+
 
 def compute_dist(X):
     G = torch.matmul(X, X.T)
@@ -20,6 +27,7 @@ def compute_dist(X):
         - 2 * G
     )
     return D
+
 
 class WeightedSumConv(MessagePassing):
     def __init__(self):
@@ -107,51 +115,51 @@ class GraphWaveletTransform(nn.Module):
         return feats
 
 
-class DenseGraphWaveletTransform():
-    '''
+class DenseGraphWaveletTransform:
+    """
     This class is used to generate graph wavelet transform features from a given adjacency matrix and node features.
-    The graph wavelet transform is a method to generate features from a graph that are invariant to the graph's structure.'''
+    The graph wavelet transform is a method to generate features from a graph that are invariant to the graph's structure."""
 
     def __init__(self, adj, ro, device):
         self.adj = adj
         self.ro = ro
         self.device = device
         d = self.adj.sum(0)
-        P_t = self.adj/d
+        P_t = self.adj / d
         P_t[torch.isnan(P_t)] = 0
-        self.P = 1/2*(torch.eye(P_t.shape[0]).to(self.device)+P_t)
+        self.P = 1 / 2 * (torch.eye(P_t.shape[0]).to(self.device) + P_t)
         self.psi = []
-        for d1 in [1,2,4,8,16]:
-            W_d1 = torch.matrix_power(self.P,d1) - torch.matrix_power(self.P,2*d1)
+        for d1 in [1, 2, 4, 8, 16]:
+            W_d1 = torch.matrix_power(self.P, d1) - torch.matrix_power(self.P, 2 * d1)
             self.psi.append(W_d1)
 
     def zero_order_feature(self):
-        F0 = torch.matrix_power(self.P,16)@self.ro
+        F0 = torch.matrix_power(self.P, 16) @ self.ro
         return F0
 
     def first_order_feature(self):
-        u = [torch.abs(self.psi[i]@self.ro) for i in range(len(self.psi))]
-        F1 = torch.cat(u,1)
+        u = [torch.abs(self.psi[i] @ self.ro) for i in range(len(self.psi))]
+        F1 = torch.cat(u, 1)
         return F1, u
 
-    def second_order_feature(self,u):
+    def second_order_feature(self, u):
         u1 = torch.zeros((self.ro.shape)).to(self.device)
         for j in range(len(self.psi)):
-            for j_prime in range(0,j):
-                if(j_prime==0 and j==0):
-                    u1 = torch.abs(self.psi[j_prime]@u[j])
+            for j_prime in range(0, j):
+                if j_prime == 0 and j == 0:
+                    u1 = torch.abs(self.psi[j_prime] @ u[j])
                 else:
-                    u1 = torch.cat((u1, torch.abs(self.psi[j_prime]@u[j])), 1)
+                    u1 = torch.cat((u1, torch.abs(self.psi[j_prime] @ u[j])), 1)
         return u1
 
     def generate_timepoint_feature(self):
         F0 = self.zero_order_feature()
-        F1,u = self.first_order_feature()
+        F1, u = self.first_order_feature()
         F2 = self.second_order_feature(u)
-        F = torch.concatenate((F0,F1),axis=1)
-        F = torch.concatenate((F,F2),axis=1)
+        F = torch.concatenate((F0, F1), axis=1)
+        F = torch.concatenate((F, F2), axis=1)
         return F
-    
+
 
 def sparse_forward(point_clouds):
     self = args
@@ -221,6 +229,7 @@ def sparse_forward(point_clouds):
     features = features.view(B_pc, features.shape[1] * self.n_weights)
     return features
 
+
 def dense_forward(point_clouds):
     self = args
     sigma = 10
@@ -237,5 +246,47 @@ def dense_forward(point_clouds):
             W = torch.where(W < self.threshold, torch.zeros_like(W), W)
             gwt = DenseGraphWaveletTransform(W, X_bar, self.device)
             feats.append(gwt.generate_timepoint_feature())
-            
+
     return torch.tensor(feats)
+
+
+def main(args):
+    alphas = torch.rand((args.n_weights, 44), requires_grad=True).to(args.device)
+    args.alphas = alphas
+
+    PCs, labels, num_labels = load_data(
+        "/home/tl855/project_pi_sk2433/shared/Hiren_2025_HiPoNet/pdo_data/", ""
+    )
+
+    input_tensor = torch.nested.as_nested_tensor(
+        PCs[:8], device=args.device, layout=torch.jagged
+    )
+
+    with torch.profiler.profile(
+        [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+    ) as p1:
+        sparse_out = sparse_forward(input_tensor)
+        loss = sparse_out.sum()
+        loss.backward()
+
+    # Reset grads
+    alphas.grad.zero_()
+
+    with torch.profiler.profile(
+        [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+    ) as p2:
+        dense_out = dense_forward(input_tensor)
+        loss = sparse_out.sum()
+        loss.backward()
+
+    p1.export_chrome_trace("sparse.json")
+    p2.export_chrome_trace("dense.json")
+
+    if not torch.allclose(sparse_out, dense_out):
+        raise ValueError("sparse and dense should give same results")
