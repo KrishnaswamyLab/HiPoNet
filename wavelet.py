@@ -232,22 +232,16 @@ def sparse_forward(point_clouds):
 
 def dense_forward(point_clouds):
     self = args
-    sigma = 10
-
-    B_pc = len(point_clouds)
-    feats = []
-    for p in range(B_pc):
-        pc = point_clouds[p]
+    PSI = []
+    for point_cloud in point_clouds:
         for i in range(self.n_weights):
-            X_bar = pc * self.alphas[i]
-
+            X_bar = (point_cloud)*self.alphas[i]
             W = compute_dist(X_bar)
-            W = torch.exp(-W / sigma)
+            W = torch.exp(-(W / 10))
             W = torch.where(W < self.threshold, torch.zeros_like(W), W)
             gwt = DenseGraphWaveletTransform(W, X_bar, self.device)
-            feats.append(gwt.generate_timepoint_feature())
-
-    return torch.tensor(feats)
+            PSI.append(gwt.generate_timepoint_feature())
+    return torch.cat(PSI, dim = 1)
 
 
 def main(args):
