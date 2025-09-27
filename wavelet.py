@@ -130,19 +130,23 @@ class SparseGraphWaveletTransform(nn.Module):
         F2 = []
         PSI = torch.zeros((0, num_points, num_points)).to_sparse()
         for i in range(self.J):
-            # We do a mm of P_powered with itself, giving powers of 2 of P: P^2 = PP, P^4 = (P^2)(P^2), ...
+            # We multiply P_powered with itself, giving powers of 2: P^2 = PP, P^4 = (P^2)(P^2), ...
             new_P_powered: torch.Tensor = torch.sparse.mm(P_powered, P_powered)
             # The wavelet operator is the *difference* between diffusion scales i+1 and i
             psi_i = new_P_powered - P_powered
-            # We accumulate the different scales into a single operator for scales 1 to i+1
-            # Note that we make this a *tensor*, since we want to use it to calculate
-            # second-order features |psi_i @ |psi_j X| |
-            PSI = torch.cat((PSI, psi_i.unsqueeze(0)), 0)
             # The first-order scattering coefficient is given by psi X, followed by nonlinearity
             # F1 accumulates first-order features
             scattering_coef_i = torch.abs(torch.mm(psi_i, X)).unsqueeze(0)
             F1.append(scattering_coef_i)
             F2.append(torch.abs(torch.bmm(PSI, scattering_coef_i.expand(PSI.shape[0],-1 ,-1))))
+            
+            # We accumulate the different scales into a single operator for scales 1 to i+1
+            # Note that we make this a *tensor*, since we want to use it to calculate
+            # second-order features |psi_i @ |psi_j X| |
+            # We only want the *off-diagonal* second-order elements, so we do this after F2
+            PSI = torch.cat((PSI, psi_i.unsqueeze(0)), 0)
+
+            # Reset for next loop
             P_powered = new_P_powered
 
         F0 = torch.mm(P_powered, X).unsqueeze(0)
