@@ -29,7 +29,7 @@ class GraphWaveletTransform(nn.Module):
         self.J = J
         self.num_feats = self.X_init.size(1)
 
-        self.max_scale = 2 ** (J - 1)
+        self.max_scale = 2 ** J
         self.pooling = pooling
 
     def diffuse(self, x=None):
