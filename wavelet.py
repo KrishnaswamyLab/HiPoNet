@@ -290,3 +290,7 @@ def main(args):
 
     if not torch.allclose(sparse_out, dense_out):
         raise ValueError("sparse and dense should give same results")
+
+
+if __name__ == "__main__":
+    main(args)
