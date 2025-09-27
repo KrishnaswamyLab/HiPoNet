@@ -53,7 +53,7 @@ class GraphWaveletTransform(nn.Module):
         self.J = J
         self.num_feats = self.X_init.size(1)
 
-        self.max_scale = 2 ** (J - 1)
+        self.max_scale = 2 ** J
         self.pooling = pooling
 
     def diffuse(self, x=None):
@@ -143,14 +143,11 @@ class DenseGraphWaveletTransform:
         return F1, u
 
     def second_order_feature(self, u):
-        u1 = torch.zeros((self.ro.shape)).to(self.device)
+        features = []
         for j in range(len(self.psi)):
             for j_prime in range(0, j):
-                if j_prime == 0 and j == 0:
-                    u1 = torch.abs(self.psi[j_prime] @ u[j])
-                else:
-                    u1 = torch.cat((u1, torch.abs(self.psi[j_prime] @ u[j])), 1)
-        return u1
+                features.append(torch.abs(self.psi[j_prime] @ u[j]))
+        return torch.cat(features, dim=1)
 
     def generate_timepoint_feature(self):
         F0 = self.zero_order_feature()
@@ -222,7 +219,7 @@ def sparse_forward(point_clouds):
 
     batch = torch.tensor(batch, device=self.device, dtype=torch.long)
 
-    J = 3
+    J = 5
     gwt = GraphWaveletTransform(edge_index, edge_weight, X_cat, J, self.device)
 
     features = gwt.generate_timepoint_features(batch)
@@ -235,13 +232,14 @@ def dense_forward(point_clouds):
     PSI = []
     for point_cloud in point_clouds:
         for i in range(self.n_weights):
-            X_bar = (point_cloud)*self.alphas[i]
+            X_bar = (point_cloud) * self.alphas[i]
             W = compute_dist(X_bar)
             W = torch.exp(-(W / 10))
             W = torch.where(W < self.threshold, torch.zeros_like(W), W)
             gwt = DenseGraphWaveletTransform(W, X_bar, self.device)
-            PSI.append(gwt.generate_timepoint_feature())
-    return torch.cat(PSI, dim = 1)
+            feats = gwt.generate_timepoint_feature()
+            PSI.append(feats.mean(0))
+    return torch.stack(PSI, dim=1)
 
 
 def main(args):
@@ -253,37 +251,36 @@ def main(args):
     )
 
     input_tensor = torch.nested.as_nested_tensor(
-        PCs[:8], device=args.device, layout=torch.jagged
+        [p[:17] for p in PCs[:1]], device=args.device, layout=torch.jagged
     )
 
-    with torch.profiler.profile(
-        [
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ]
-    ) as p1:
-        sparse_out = sparse_forward(input_tensor)
-        loss = sparse_out.sum()
-        loss.backward()
+    memory = []
+    max_memory = []
+    memory.append(torch.cuda.memory_allocated())
+    sparse_out = sparse_forward(input_tensor)
+    loss = sparse_out.sum()
+    loss.backward()
+    memory.append(torch.cuda.memory_allocated())
+    max_memory.append(torch.cuda.max_memory_allocated())
 
     # Reset grads
     alphas.grad.zero_()
+    print("Completed sparse")
 
-    with torch.profiler.profile(
-        [
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ]
-    ) as p2:
-        dense_out = dense_forward(input_tensor)
-        loss = sparse_out.sum()
-        loss.backward()
+    memory.append(torch.cuda.memory_allocated())
+    dense_out = dense_forward(input_tensor)
+    loss = dense_out.sum()
+    loss.backward()
+    memory.append(torch.cuda.memory_allocated())
+    max_memory.append(torch.cuda.max_memory_allocated())
 
-    p1.export_chrome_trace("sparse.json")
-    p2.export_chrome_trace("dense.json")
+    print("Completed dense")
 
     if not torch.allclose(sparse_out, dense_out):
         raise ValueError("sparse and dense should give same results")
+
+    print(memory)
+    print(max_memory)
 
 
 if __name__ == "__main__":
