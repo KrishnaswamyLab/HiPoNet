@@ -34,7 +34,8 @@ def compute_dist(X):
     )
     return D
 
-batched_compute_dist = torch.vmap(compute_dist)
+
+batched_compute_dist = torch.vmap(torch.vmap(compute_dist))
 
 
 class WeightedSumConv(MessagePassing):
@@ -169,7 +170,8 @@ class SparseGraphWaveletTransform(nn.Module):
         return features.flatten()
 
     batched_generate_timepoint_features = torch.vmap(
-        generate_timepoint_features, in_dims=(None, 0, 0)
+        torch.vmap(generate_timepoint_features, in_dims=(None, 0, 0)),
+        in_dims=(None, 0, 0),
     )
 
 
@@ -293,22 +295,20 @@ def sparse_forward_new(point_clouds, J):
     features = []
 
     gwt = SparseGraphWaveletTransform(J, self.device)
-    for p in range(B_pc):
-        pc = point_clouds[p]
-        num_points = pc.shape[0]
-        X_bar = pc * pc.unsqueeze(0) * self.alphas.unsqueeze(1)
-        W = batched_compute_dist(X_bar)
-        W = torch.exp(-W / sigma)
-        W = torch.where(W < self.threshold, torch.zeros_like(W), W)
-        d = W.sum(1, keepdim=True)
-        W = W / d
-        W.diagonal(dim1=1, dim2=2).add_(0.5 * torch.ones(num_points, device=W.device))
-        features.append(
-            gwt.batched_generate_timepoint_features(
-                W,
-                X_bar,
-            )
-        )
+
+    from IPython import embed; embed()
+    # X_bar shape: (B, n_weights, N, d)
+    X_bar = point_clouds.unsqueeze(1) * self.alphas[None, :, None, :]
+    W = batched_compute_dist(X_bar)
+    W = torch.exp(-W / sigma)
+    W = torch.where(W < self.threshold, torch.zeros_like(W), W)
+    d = W.sum(2, keepdim=True)
+    W.div_(d)
+    W.diagonal(dim1=-2, dim2=-1).add_(0.5)
+    gwt.batched_generate_timepoint_features(
+        W,
+        X_bar,
+    )
     return torch.stack(features, 0)
 
 
@@ -338,7 +338,7 @@ def main(args):
         "/home/tl855/project_pi_sk2433/shared/Hiren_2025_HiPoNet/pdo_data/", ""
     )
 
-    PCs = sorted(PCs, key=lambda x: x.shape[0], reverse=True)
+    # PCs = sorted(PCs, key=lambda x: x.shape[0], reverse=True)
 
     input_tensor = torch.nested.as_nested_tensor(
         [p[: args.num_points] for p in PCs[:6]], device=args.device, layout=torch.jagged
