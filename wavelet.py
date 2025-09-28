@@ -34,6 +34,8 @@ def compute_dist(X):
     )
     return D
 
+batched_compute_dist = torch.vmap(compute_dist)
+
 
 class WeightedSumConv(MessagePassing):
     def __init__(self):
@@ -294,21 +296,20 @@ def sparse_forward_new(point_clouds, J):
     for p in range(B_pc):
         pc = point_clouds[p]
         num_points = pc.shape[0]
-        for i in range(self.n_weights):
-            X_bar = pc * self.alphas[i]
 
-            W = compute_dist(X_bar)
-            W = torch.exp(-W / sigma)
-            W = torch.where(W < self.threshold, torch.zeros_like(W), W)
-            d = W.sum(0)
-            W = W / d
-            W.diagonal().add_(0.5 * torch.ones(num_points, device=W.device))
-            features.append(
-                gwt.generate_timepoint_features(
-                    W,
-                    X_bar,
-                )
+        X_bar = pc * pc.unsqueeze(0) * self.alphas.unsqueeze(1)
+        W = batched_compute_dist(X_bar)
+        W = torch.exp(-W / sigma)
+        W = torch.where(W < self.threshold, torch.zeros_like(W), W)
+        d = W.sum(1, keepdim=True)
+        W = W / d
+        W.diagonal(dim1=1, dim2=2).add_(0.5 * torch.ones(num_points, device=W.device))
+        features.append(
+            gwt.batched_generate_timepoint_features(
+                W,
+                X_bar,
             )
+        )
     return torch.stack(features, 0)
 
 
