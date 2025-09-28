@@ -296,7 +296,6 @@ def sparse_forward_new(point_clouds, J):
 
     gwt = SparseGraphWaveletTransform(J, self.device)
 
-    from IPython import embed; embed()
     # X_bar shape: (B, n_weights, N, d)
     X_bar = point_clouds.unsqueeze(1) * self.alphas[None, :, None, :]
     W = batched_compute_dist(X_bar)
