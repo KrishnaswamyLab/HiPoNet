@@ -296,7 +296,6 @@ def sparse_forward_new(point_clouds, J):
     for p in range(B_pc):
         pc = point_clouds[p]
         num_points = pc.shape[0]
-
         X_bar = pc * pc.unsqueeze(0) * self.alphas.unsqueeze(1)
         W = batched_compute_dist(X_bar)
         W = torch.exp(-W / sigma)
@@ -339,29 +338,14 @@ def main(args):
         "/home/tl855/project_pi_sk2433/shared/Hiren_2025_HiPoNet/pdo_data/", ""
     )
 
+    PCs = sorted(PCs, key=lambda x: x.shape[0], reverse=True)
+
     input_tensor = torch.nested.as_nested_tensor(
         [p[: args.num_points] for p in PCs[:6]], device=args.device, layout=torch.jagged
-    )
+    ).to_padded_tensor(padding=0.0)
 
     timings = []
-    memory = []
     max_memory = []
-    memory.append(("start", torch.cuda.memory_allocated() / GB))
-
-    start = time.time()
-    sparse_out = sparse_forward(input_tensor, args.J)
-    loss = sparse_out.sum()
-    loss.backward()
-    end = time.time()
-    timings.append(("sparse", end - start))
-    memory.append(("post sparse", torch.cuda.memory_allocated() / GB))
-    max_memory.append(("post sparse", torch.cuda.max_memory_allocated() / GB))
-
-    # Reset grads
-    alphas.grad.zero_()
-    print("Completed sparse")
-    if args.device == "cuda":
-        torch.cuda.reset_peak_memory_stats()
 
     start = time.time()
     sparse_out_new = sparse_forward_new(input_tensor, args.J)
@@ -369,7 +353,6 @@ def main(args):
     loss.backward()
     end = time.time()
     timings.append(("sparse new", end - start))
-    memory.append(("post sparse new", torch.cuda.memory_allocated() / GB))
     max_memory.append(("post sparse new", torch.cuda.max_memory_allocated() / GB))
 
     # Reset grads
@@ -384,13 +367,12 @@ def main(args):
     loss.backward()
     end = time.time()
     timings.append(("dense", end - start))
-    memory.append(("post dense", torch.cuda.memory_allocated() / GB))
     max_memory.append(("post dense", torch.cuda.max_memory_allocated() / GB))
 
     print("Completed dense")
 
-    print(sparse_out.shape, sparse_out_new.shape, dense_out.shape)
-    print(memory)
+    print(sparse_out_new.shape, dense_out.shape)
+    print("-----------")
     print(max_memory)
     print(timings)
 
