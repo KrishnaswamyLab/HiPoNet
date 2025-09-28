@@ -132,7 +132,7 @@ class SparseGraphWaveletTransform(nn.Module):
         self.J = J
         self.pooling = pooling
 
-    def generate_timepoint_features(self, P, X):
+    def generate_timepoint_features(self, P, X, mask):
         num_points = P.shape[0]
         P_powered = P
         F1 = []
@@ -166,14 +166,15 @@ class SparseGraphWaveletTransform(nn.Module):
         features = torch.cat([F0, *F1, *F2])
 
         if self.pooling:
-            features = features.mean(dim=1)
+            # We *sum* instead of mean, since we want to ignore masked-out nodes
+            features = features.sum(dim=1) / mask.sum()
 
         return features.flatten()
 
     # Batch over the graphs, and batch over the alphas
     forward = torch.vmap(
-        torch.vmap(generate_timepoint_features, in_dims=(None, 0, 0)),
-        in_dims=(None, 0, 0),
+        torch.vmap(generate_timepoint_features, in_dims=(None, 0, 0, 0)),
+        in_dims=(None, 0, 0, 0),
     )
 
 
@@ -219,25 +220,25 @@ class DenseGraphWaveletTransform:
         F = torch.concatenate((F, F2), axis=1)
         return F
 
-@torch.compile(fullgraph=True, disable=True)
+
+@torch.compile(fullgraph=True)
 def compute_diffusion_matrix(point_clouds, alphas, sigma, threshold, mask):
     # X_bar shape: (B, n_weights, N, d)
     X_bar = point_clouds.unsqueeze(1) * alphas[None, :, None, :]
     W = batched_compute_dist(X_bar)
     W = torch.exp(-W / sigma)
-    W = torch.where(W < threshold, 0., W)
-
-    # n = mask[2].sum()
-    # W_ = W[2, 0, :n, :n].clone()
-    # d_ = W_.sum(0, keepdim=True).clamp_min(1e-6)
-    # W_.div_(d_)
-    # W_.diagonal(dim1=-2, dim2=-1).add_(0.5)
-
-    W = torch.where(mask[:, None, :, None] & mask[:, None, None, :], W, 0.)
-    d = W.sum(2, keepdim=True).clamp_min(1e-6)
+    W = torch.where(W < threshold, 0.0, W)
+    # Mask has shape (B, N)
+    # We first want to broadcast to (B, 1, N)
+    # We then want to set any row or column that is masked out to zero
+    W = torch.where(mask[:, None, :, None] & mask[:, None, None, :], W, 0.0)
+    # We clamp the min to avoid division by zero
+    d = W.sum(2, keepdim=True).clamp_min(1e-8)
     W.div_(d)
+    # Add self-loops with weight 0.5
     W.diagonal(dim1=-2, dim2=-1).add_(0.5)
     return W, X_bar
+
 
 def sparse_forward_new(point_clouds, gwt: SparseGraphWaveletTransform, mask):
     self = args
@@ -245,10 +246,8 @@ def sparse_forward_new(point_clouds, gwt: SparseGraphWaveletTransform, mask):
     W, X_bar = compute_diffusion_matrix(
         point_clouds, self.alphas, sigma, self.threshold, mask
     )
-    features = gwt(
-        W,
-        X_bar,
-    )
+    # Mask has shape (B, N), expand to (B, n_weights, N) to match W and X_bar
+    features = gwt(W, X_bar, mask.unsqueeze(1).expand((-1, self.n_weights, -1)))
     return features
 
 
@@ -288,12 +287,12 @@ def main(args):
     max_memory = []
 
     gwt = SparseGraphWaveletTransform(args.J, args.device)
-    #gwt.compile(fullgraph=True)
+    gwt.compile(fullgraph=True)
     # Run it once to JIT compile
     sparse_out_new = sparse_forward_new(input_tensor, gwt, mask)
 
     N_repeats = 10
-    
+
     t, m = [], []
     for _ in range(N_repeats):
         start = time.time()
@@ -309,8 +308,12 @@ def main(args):
         if args.device == "cuda":
             torch.cuda.reset_peak_memory_stats()
 
-    timings.append(f"sparse_new {torch.tensor(t).mean().item():.4f}s +- {torch.std(torch.tensor(t)).item():.4f}s")
-    max_memory.append(f"sparse_new {torch.tensor(m).mean().item():.4f}GB +- {torch.std(torch.tensor(m)).item():.4f}GB")
+    timings.append(
+        f"sparse_new {torch.tensor(t).mean().item():.4f}s +- {torch.std(torch.tensor(t)).item():.4f}s"
+    )
+    max_memory.append(
+        f"sparse_new {torch.tensor(m).mean().item():.4f}GB +- {torch.std(torch.tensor(m)).item():.4f}GB"
+    )
 
     t, m = [], []
     for _ in range(N_repeats):
@@ -327,8 +330,12 @@ def main(args):
         if args.device == "cuda":
             torch.cuda.reset_peak_memory_stats()
 
-    timings.append(f"dense {torch.tensor(t).mean().item():.4f}s +- {torch.std(torch.tensor(t)).item():.4f}s")
-    max_memory.append(f"dense {torch.tensor(m).mean().item():.4f}GB +- {torch.std(torch.tensor(m)).item():.4f}GB")
+    timings.append(
+        f"dense {torch.tensor(t).mean().item():.4f}s +- {torch.std(torch.tensor(t)).item():.4f}s"
+    )
+    max_memory.append(
+        f"dense {torch.tensor(m).mean().item():.4f}GB +- {torch.std(torch.tensor(m)).item():.4f}GB"
+    )
 
     print("-----------")
     print(sparse_out_new.shape, dense_out.shape)
