@@ -169,6 +169,7 @@ class SparseGraphWaveletTransform(nn.Module):
 
         return features.flatten()
 
+    # Batch over the graphs, and batch over the alphas
     batched_generate_timepoint_features = torch.vmap(
         torch.vmap(generate_timepoint_features, in_dims=(None, 0, 0)),
         in_dims=(None, 0, 0),
