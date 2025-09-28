@@ -296,7 +296,7 @@ def main(args):
     t, m = [], []
     for _ in range(N_repeats):
         start = time.time()
-        sparse_out_new = sparse_forward_new(input_tensor, gwt)
+        sparse_out_new = sparse_forward_new(input_tensor, gwt, mask)
         loss = sparse_out_new.sum()
         loss.backward()
         end = time.time()
