@@ -219,23 +219,31 @@ class DenseGraphWaveletTransform:
         F = torch.concatenate((F, F2), axis=1)
         return F
 
-@torch.compile(fullgraph=True)
-def compute_diffusion_matrix(point_clouds, alphas, sigma, threshold):
+@torch.compile(fullgraph=True, disable=True)
+def compute_diffusion_matrix(point_clouds, alphas, sigma, threshold, mask):
     # X_bar shape: (B, n_weights, N, d)
     X_bar = point_clouds.unsqueeze(1) * alphas[None, :, None, :]
     W = batched_compute_dist(X_bar)
     W = torch.exp(-W / sigma)
-    W = torch.where(W < threshold, torch.zeros_like(W), W)
-    d = W.sum(2, keepdim=True)
+    W = torch.where(W < threshold, 0., W)
+
+    # n = mask[2].sum()
+    # W_ = W[2, 0, :n, :n].clone()
+    # d_ = W_.sum(0, keepdim=True).clamp_min(1e-6)
+    # W_.div_(d_)
+    # W_.diagonal(dim1=-2, dim2=-1).add_(0.5)
+
+    W = torch.where(mask[:, None, :, None] & mask[:, None, None, :], W, 0.)
+    d = W.sum(2, keepdim=True).clamp_min(1e-6)
     W.div_(d)
     W.diagonal(dim1=-2, dim2=-1).add_(0.5)
     return W, X_bar
 
-def sparse_forward_new(point_clouds, gwt):
+def sparse_forward_new(point_clouds, gwt: SparseGraphWaveletTransform, mask):
     self = args
     sigma = 10
     W, X_bar = compute_diffusion_matrix(
-        point_clouds, self.alphas, sigma, self.threshold
+        point_clouds, self.alphas, sigma, self.threshold, mask
     )
     features = gwt(
         W,
@@ -273,15 +281,16 @@ def main(args):
     input_tensor = torch.nested.as_nested_tensor(
         [p[: args.num_points] for p in PCs[:4]], device=args.device, layout=torch.jagged
     ).to_padded_tensor(padding=0.0)
+    mask = input_tensor.sum(-1) != 0
     print("input shape:", input_tensor.shape)
 
     timings = []
     max_memory = []
 
     gwt = SparseGraphWaveletTransform(args.J, args.device)
-    gwt.compile(fullgraph=True)
+    #gwt.compile(fullgraph=True)
     # Run it once to JIT compile
-    sparse_out_new = sparse_forward_new(input_tensor, gwt)
+    sparse_out_new = sparse_forward_new(input_tensor, gwt, mask)
 
     N_repeats = 10
     
