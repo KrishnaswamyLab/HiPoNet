@@ -166,6 +166,10 @@ class SparseGraphWaveletTransform(nn.Module):
 
         return features.flatten()
 
+    batched_generate_timepoint_features = torch.vmap(
+        generate_timepoint_features, in_dims=(None, 0, 0)
+    )
+
 
 class DenseGraphWaveletTransform:
     """
