@@ -1,6 +1,7 @@
 import argparse
 import torch
 import torch.nn as nn
+import time
 
 from torch_geometric.nn import MessagePassing
 from torch_geometric.nn import global_mean_pool
@@ -170,7 +171,7 @@ class SparseGraphWaveletTransform(nn.Module):
         return features.flatten()
 
     # Batch over the graphs, and batch over the alphas
-    batched_generate_timepoint_features = torch.vmap(
+    forward = torch.vmap(
         torch.vmap(generate_timepoint_features, in_dims=(None, 0, 0)),
         in_dims=(None, 0, 0),
     )
@@ -286,30 +287,29 @@ def sparse_forward(point_clouds, J):
     features = features.view(B_pc, features.shape[1] * self.n_weights)
     return features
 
-
-def sparse_forward_new(point_clouds, J):
-    self = args
-    sigma = 10
-
-    B_pc = len(point_clouds)
-    d = point_clouds[0].shape[1]
-    features = []
-
-    gwt = SparseGraphWaveletTransform(J, self.device)
-
+@torch.compile(fullgraph=True)
+def compute_diffusion_matrix(point_clouds, alphas, sigma, threshold):
     # X_bar shape: (B, n_weights, N, d)
-    X_bar = point_clouds.unsqueeze(1) * self.alphas[None, :, None, :]
+    X_bar = point_clouds.unsqueeze(1) * alphas[None, :, None, :]
     W = batched_compute_dist(X_bar)
     W = torch.exp(-W / sigma)
-    W = torch.where(W < self.threshold, torch.zeros_like(W), W)
+    W = torch.where(W < threshold, torch.zeros_like(W), W)
     d = W.sum(2, keepdim=True)
     W.div_(d)
     W.diagonal(dim1=-2, dim2=-1).add_(0.5)
-    gwt.batched_generate_timepoint_features(
+    return W, X_bar
+
+def sparse_forward_new(point_clouds, gwt):
+    self = args
+    sigma = 10
+    W, X_bar = compute_diffusion_matrix(
+        point_clouds, self.alphas, sigma, self.threshold
+    )
+    features = gwt(
         W,
         X_bar,
     )
-    return torch.stack(features, 0)
+    return features
 
 
 def dense_forward(point_clouds, J):
@@ -328,8 +328,6 @@ def dense_forward(point_clouds, J):
 
 
 def main(args):
-    import time
-
     alphas = torch.rand((args.n_weights, 44)).to(args.device)
     alphas.requires_grad_(True)
     args.alphas = alphas
@@ -338,39 +336,60 @@ def main(args):
         "/home/tl855/project_pi_sk2433/shared/Hiren_2025_HiPoNet/pdo_data/", ""
     )
 
-    # PCs = sorted(PCs, key=lambda x: x.shape[0], reverse=True)
+    PCs = sorted(PCs, key=lambda x: x.shape[0], reverse=True)
 
     input_tensor = torch.nested.as_nested_tensor(
-        [p[: args.num_points] for p in PCs[:6]], device=args.device, layout=torch.jagged
+        [p[: args.num_points] for p in PCs[:4]], device=args.device, layout=torch.jagged
     ).to_padded_tensor(padding=0.0)
+    print("input shape:", input_tensor.shape)
 
     timings = []
     max_memory = []
 
-    start = time.time()
-    sparse_out_new = sparse_forward_new(input_tensor, args.J)
-    loss = sparse_out_new.sum()
-    loss.backward()
-    end = time.time()
-    timings.append(("sparse new", end - start))
-    max_memory.append(("post sparse new", torch.cuda.max_memory_allocated() / GB))
+    gwt = SparseGraphWaveletTransform(args.J, args.device)
+    gwt.compile(fullgraph=True)
+    # Run it once to JIT compile
+    sparse_out_new = sparse_forward_new(input_tensor, gwt)
 
-    # Reset grads
-    alphas.grad.zero_()
-    print("Completed sparse new")
-    if args.device == "cuda":
-        torch.cuda.reset_peak_memory_stats()
+    N_repeats = 10
+    
+    t, m = [], []
+    for _ in range(N_repeats):
+        start = time.time()
+        sparse_out_new = sparse_forward_new(input_tensor, gwt)
+        loss = sparse_out_new.sum()
+        loss.backward()
+        end = time.time()
+        t.append(end - start)
+        m.append(torch.cuda.max_memory_allocated() / GB)
 
-    start = time.time()
-    dense_out = dense_forward(input_tensor, args.J)
-    loss = dense_out.sum()
-    loss.backward()
-    end = time.time()
-    timings.append(("dense", end - start))
-    max_memory.append(("post dense", torch.cuda.max_memory_allocated() / GB))
+        # Reset grads
+        alphas.grad.zero_()
+        if args.device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
 
-    print("Completed dense")
+    timings.append(f"sparse_new {torch.tensor(t).mean().item():.4f}s +- {torch.std(torch.tensor(t)).item():.4f}s")
+    max_memory.append(f"sparse_new {torch.tensor(m).mean().item():.4f}GB +- {torch.std(torch.tensor(m)).item():.4f}GB")
 
+    t, m = [], []
+    for _ in range(N_repeats):
+        start = time.time()
+        dense_out = dense_forward(input_tensor, args.J)
+        loss = dense_out.sum()
+        loss.backward()
+        end = time.time()
+        t.append(end - start)
+        m.append(torch.cuda.max_memory_allocated() / GB)
+
+        # Reset grads
+        alphas.grad.zero_()
+        if args.device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+
+    timings.append(f"dense {torch.tensor(t).mean().item():.4f}s +- {torch.std(torch.tensor(t)).item():.4f}s")
+    max_memory.append(f"dense {torch.tensor(m).mean().item():.4f}GB +- {torch.std(torch.tensor(m)).item():.4f}GB")
+
+    print("-----------")
     print(sparse_out_new.shape, dense_out.shape)
     print("-----------")
     print(max_memory)
