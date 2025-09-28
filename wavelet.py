@@ -248,7 +248,8 @@ def sparse_forward_new(point_clouds, gwt: SparseGraphWaveletTransform, mask):
     )
     # Mask has shape (B, N), expand to (B, n_weights, N) to match W and X_bar
     features = gwt(W, X_bar, mask.unsqueeze(1).expand((-1, self.n_weights, -1)))
-    return features
+    # Reshape to (B, n_weights * feature_dim)
+    return features.view(features.size(0), -1)
 
 
 def dense_forward(point_clouds, J):
