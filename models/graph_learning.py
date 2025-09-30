@@ -22,7 +22,21 @@ def compute_dist(X):
 batched_compute_dist = torch.vmap(torch.vmap(compute_dist))
 
 
-@torch.compile(fullgraph=True)
+def compute_diffusion_from_dist(W, sigma, threshold, mask):
+    W = torch.exp(-W / sigma)
+    W = torch.where(W < threshold, 0.0, W)
+    # Mask has shape (B, N)
+    # We first want to broadcast to (B, 1, N)
+    # We then want to set any row or column that is masked out to zero
+    W = torch.where(mask[:, None, :, None] & mask[:, None, None, :], W, 0.0)
+    # We clamp the min to avoid division by zero
+    d = W.sum(2, keepdim=True).clamp_min(1e-8)
+    W.div_(d)
+    # Add self-loops with weight 0.5
+    W.diagonal(dim1=-2, dim2=-1).add_(0.5)
+    return W
+
+
 def compute_diffusion_matrix(point_clouds, alphas, sigma, threshold, mask):
     """Given a batch of point clouds and a set of alphas, compute the diffusion matrices.
 
@@ -37,17 +51,7 @@ def compute_diffusion_matrix(point_clouds, alphas, sigma, threshold, mask):
     # X_bar shape: (B, n_weights, N, d)
     X_bar = point_clouds.unsqueeze(1) * alphas[None, :, None, :]
     W = batched_compute_dist(X_bar)
-    W = torch.exp(-W / sigma)
-    W = torch.where(W < threshold, 0.0, W)
-    # Mask has shape (B, N)
-    # We first want to broadcast to (B, 1, N)
-    # We then want to set any row or column that is masked out to zero
-    W = torch.where(mask[:, None, :, None] & mask[:, None, None, :], W, 0.0)
-    # We clamp the min to avoid division by zero
-    d = W.sum(2, keepdim=True).clamp_min(1e-8)
-    W.div_(d)
-    # Add self-loops with weight 0.5
-    W.diagonal(dim1=-2, dim2=-1).add_(0.5)
+    W = compute_diffusion_from_dist(W, sigma, threshold, mask)
     return W, X_bar
 
 
@@ -82,7 +86,9 @@ class GraphFeatLearningLayer(nn.Module):
             point_clouds, self.alphas, self.sigma, self.threshold, mask
         )
         # Mask has shape (B, N), expand to (B, n_weights, N) to match W and X_bar
-        features = self.gwt(W, X_bar, mask.unsqueeze(1).expand((-1, self.n_weights, -1)))
+        features = self.gwt(
+            W, X_bar, mask.unsqueeze(1).expand((-1, self.n_weights, -1))
+        )
         # Reshape to (B, n_weights * feature_dim)
         return features.view(features.size(0), -1)
 
@@ -459,7 +465,9 @@ class SimplicialFeatLearningLayerTetra(nn.Module):
 
 
 class HiPoNet(nn.Module):
-    def __init__(self, dimension, n_weights, threshold, K, J, device, sigma, pooling=True):
+    def __init__(
+        self, dimension, n_weights, threshold, K, J, device, sigma, pooling=True
+    ):
         super(HiPoNet, self).__init__()
         self.dimension = dimension
         if K == 1:

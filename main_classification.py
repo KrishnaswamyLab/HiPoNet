@@ -31,6 +31,7 @@ parser.add_argument(
 )
 parser.add_argument("--sigma", type=float, default=0.5, help="Bandwidth")
 parser.add_argument("--K", type=int, default=1, help="Order of simplicial complex")
+parser.add_argument("--J", type=int, default=3, help="Number of wavelet scales")
 parser.add_argument(
     "--hidden_dim", type=int, default=256, help="Hidden dim for the MLP"
 )
@@ -66,8 +67,8 @@ def test(model, loader):
     correct = 0
     total = 0
     with torch.no_grad():
-        for batch, labels in loader:
-            logits = model(batch)
+        for batch, mask, labels in loader:
+            logits = model(batch, mask)
             labels = labels.to(logits.device)
             preds = torch.argmax(logits, dim=1)
             correct += torch.sum(preds == labels).detach().float().item()
@@ -105,8 +106,8 @@ def train(model: nn.Module, PCs, labels):
             model.train()
             opt.zero_grad()
             minibatches_per_batch = args.n_accumulate
-            for i, (batch, labels) in enumerate(train_loader, start=1):
-                logits = model(batch)
+            for i, (batch, mask, labels) in enumerate(train_loader, start=1):
+                logits = model(batch, mask)
                 labels = labels.to(logits.device)
                 preds = torch.argmax(logits, dim=1)
                 correct_train += torch.sum(preds == labels).detach().float().item()
@@ -159,6 +160,16 @@ def train(model: nn.Module, PCs, labels):
             )
     print(f"Best accuracy : {best_acc}")
 
+class ClassificationModel(nn.Module):
+        def __init__(self, hiponet, mlp_classifier):
+            super().__init__()
+            self.hiponet = hiponet
+            self.mlp_classifier = mlp_classifier
+
+        def forward(self, batch, mask):
+            out1 = self.hiponet(batch, mask)
+            out2 = self.mlp_classifier(out1)
+            return out2
 
 def main():
     import os
@@ -180,15 +191,18 @@ def main():
         args.num_weights,
         args.threshold,
         args.K,
+        args.J,
         args.device,
         args.sigma,
     )
     with torch.no_grad():
-        input_dim = hiponet(PCs[0].to(args.device)[None, ...]).shape[1]
+        batch = PCs[0].to(args.device)[None, ...]
+        mask = batch.sum(-1) != 0
+        input_dim = hiponet(PCs[0].to(args.device)[None, ...], mask).shape[1]
     mlp_classifier = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(
         args.device
     )
-    model = nn.DataParallel(nn.Sequential(hiponet, mlp_classifier))
+    model = nn.DataParallel(ClassificationModel(hiponet, mlp_classifier))
     train(model, PCs, labels)
 
 
