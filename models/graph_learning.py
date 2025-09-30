@@ -1,12 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-import os
-from collections import defaultdict
 
 from models.GWT import GraphWaveletTransform
-from models.SWT import SimplicialWaveletTransform
 import gc
 
 gc.enable()
@@ -22,86 +18,73 @@ def compute_dist(X):
     return D
 
 
+# compute dist, but batched over the graph dim and the alphas dim
+batched_compute_dist = torch.vmap(torch.vmap(compute_dist))
+
+
+@torch.compile(fullgraph=True)
+def compute_diffusion_matrix(point_clouds, alphas, sigma, threshold, mask):
+    """Given a batch of point clouds and a set of alphas, compute the diffusion matrices.
+
+    point_clouds: (B, N, d)
+    alphas: (n_weights, d)
+    mask: (B, N) boolean mask for valid points
+
+    Returns:
+    W: (B, n_weights, N, N) diffusion matrices
+    X_bar: (B, n_weights, N, d) reweighted point clouds
+    """
+    # X_bar shape: (B, n_weights, N, d)
+    X_bar = point_clouds.unsqueeze(1) * alphas[None, :, None, :]
+    W = batched_compute_dist(X_bar)
+    W = torch.exp(-W / sigma)
+    W = torch.where(W < threshold, 0.0, W)
+    # Mask has shape (B, N)
+    # We first want to broadcast to (B, 1, N)
+    # We then want to set any row or column that is masked out to zero
+    W = torch.where(mask[:, None, :, None] & mask[:, None, None, :], W, 0.0)
+    # We clamp the min to avoid division by zero
+    d = W.sum(2, keepdim=True).clamp_min(1e-8)
+    W.div_(d)
+    # Add self-loops with weight 0.5
+    W.diagonal(dim1=-2, dim2=-1).add_(0.5)
+    return W, X_bar
+
+
 class GraphFeatLearningLayer(nn.Module):
-    def __init__(self, n_weights, dimension, threshold, device, pooling: bool = True):
+    def __init__(
+        self,
+        n_weights: int,
+        dimension: int,
+        threshold: float,
+        sigma: int,
+        J: int,
+        device,
+        pooling: bool = True,
+    ):
         super().__init__()
         self.alphas = nn.Parameter(
-            torch.rand((n_weights, dimension), requires_grad=True).to(device)
+            torch.rand((n_weights, dimension)).to(device),
+            requires_grad=True,
         )
         self.n_weights = n_weights
         self.threshold = threshold
         self.device = device
-        self.pooling = pooling
+        self.gwt = GraphWaveletTransform(J, device, pooling=pooling)
+        self.sigma = sigma
 
-        assert self.pooling or (self.n_weights == 1), (
+        assert pooling or (self.n_weights == 1), (
             "n_weights > 1 not supported without pooling"
         )
 
-    def forward(self, point_clouds, sigma):
-        B_pc = len(point_clouds)
-        d = point_clouds[0].shape[1]
-
-        all_edge_indices = []
-        all_edge_weights = []
-        all_node_feats = []
-
-        batch = []
-
-        node_offset = 0
-
-        for p in range(B_pc):
-            pc = point_clouds[p]
-            num_points = pc.shape[0]
-            for i in range(self.n_weights):
-                X_bar = pc * self.alphas[i]
-
-                W = compute_dist(X_bar)
-                W = torch.exp(-W / sigma)
-                W = torch.where(W < self.threshold, torch.zeros_like(W), W)
-                d = W.sum(0)
-                W = W / d
-                # W[torch.isnan(W)] = 0
-                # W = 1/2*(torch.eye(W.shape[0]).to(self.device)+W)
-
-                row, col = torch.where(W > 0)
-                w_vals = W[row, col]
-
-                row_offset = row + node_offset
-                col_offset = col + node_offset
-                all_edge_indices.append(
-                    torch.cat(
-                        [
-                            torch.stack([row_offset, col_offset], dim=0),
-                            (node_offset + torch.arange(W.shape[0]).repeat(2, 1)).to(
-                                W.device
-                            ),
-                        ],
-                        1,
-                    )
-                )
-                all_edge_weights.append(
-                    torch.cat([w_vals / 2, 0.5 * torch.ones(W.shape[0]).to(W.device)])
-                )
-
-                all_node_feats.append(X_bar)
-
-                batch.extend([p * self.n_weights + i] * num_points)
-
-                node_offset += num_points
-
-        edge_index = torch.cat(all_edge_indices, dim=1).to(self.device)
-        edge_weight = torch.cat(all_edge_weights, dim=0).to(self.device)
-        X_cat = torch.cat(all_node_feats, dim=0).to(self.device)
-
-        batch = torch.tensor(batch, device=self.device, dtype=torch.long)
-
-        J = 3
-        gwt = GraphWaveletTransform(edge_index, edge_weight, X_cat, J, self.device, self.pooling)
-
-        features = gwt.generate_timepoint_features(batch)
-        if self.pooling:
-            features = features.view(B_pc, features.shape[1] * self.n_weights)
-        return features
+    def forward(self, point_clouds, mask):
+        W, X_bar = compute_diffusion_matrix(
+            point_clouds, self.alphas, self.sigma, self.threshold, mask
+        )
+        # Mask has shape (B, N), expand to (B, n_weights, N) to match W and X_bar
+        features = self.gwt(W, X_bar, mask.unsqueeze(1).expand((-1, self.n_weights, -1)))
+        # Reshape to (B, n_weights * feature_dim)
+        return features.view(features.size(0), -1)
 
 
 class SimplicialFeatLearningLayerTri(nn.Module):
@@ -476,25 +459,26 @@ class SimplicialFeatLearningLayerTetra(nn.Module):
 
 
 class HiPoNet(nn.Module):
-    def __init__(self, dimension, n_weights, threshold, K, device, sigma, pooling=True):
+    def __init__(self, dimension, n_weights, threshold, K, J, device, sigma, pooling=True):
         super(HiPoNet, self).__init__()
         self.dimension = dimension
         if K == 1:
-            self.layer = GraphFeatLearningLayer(n_weights, dimension, threshold, device, pooling=pooling)
+            self.layer = GraphFeatLearningLayer(
+                n_weights, dimension, threshold, sigma, J, device, pooling=pooling
+            )
         elif K == 2:
             self.layer = SimplicialFeatLearningLayerTri(
-                n_weights, dimension, threshold, device, pooling=pooling
+                n_weights, dimension, threshold, sigma, J, device, pooling=pooling
             )
         else:
             self.layer = SimplicialFeatLearningLayerTetra(
-                n_weights, dimension, threshold, device, pooling=pooling
+                n_weights, dimension, threshold, sigma, J, device, pooling=pooling
             )
         self.device = device
         self.sigma = sigma
 
-    def forward(self, batch):
-        PSI = self.layer(batch, self.sigma)
-        return PSI
+    def forward(self, batch, mask):
+        return self.layer(batch, mask)
 
 
 class MLP(nn.Module):

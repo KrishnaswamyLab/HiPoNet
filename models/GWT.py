@@ -17,75 +17,65 @@ class WeightedSumConv(MessagePassing):
 
 
 class GraphWaveletTransform(nn.Module):
-    def __init__(self, edge_index, edge_weight, X, J, device, pooling: bool = True):
+    def __init__(self, J, device, pooling: bool = True):
         super().__init__()
         self.device = device
-        # We'll store the graph
-        self.edge_index = edge_index.to(device)
-        self.edge_weight = edge_weight.to(device)
-        self.X_init = X.to(device)  # node features
-
-        self.conv = WeightedSumConv()
         self.J = J
-        self.num_feats = self.X_init.size(1)
-
-        self.max_scale = 2 ** (J - 1)
         self.pooling = pooling
 
-    def diffuse(self, x=None):
-        if x is None:
-            x = self.X_init
+    def generate_timepoint_features(self, P, X, mask):
+        """Generates graph wavelet features.
 
-        x_curr = x
-        out_list = []
-        for step in range(1, self.max_scale + 1):
-            x_curr = self.conv(x_curr, self.edge_index, self.edge_weight)
-            if (step & (step - 1)) == 0:
-                out_list.append(x_curr)
-        return out_list
+        There are three types of features:
+        - Zeroth-order: P^J X
+        - First-order: |psi_j X| for j in 1,...,J where psi_j = P^{2^j} - P^{2^{j-1}}
+        - Second-order: |psi_j |psi_i X| | for i < j
+        
+        P: Transition matrix (num_points x num_points)
+        X: Node features (num_points x num_features)
+        mask: Mask for valid nodes (num_points,)
+        
+        """
+        num_points = P.shape[0]
+        P_powered = P
+        F1 = []
+        F2 = []
+        PSI = torch.zeros(size=(0, num_points, num_points), device=self.device)
+        for i in range(self.J):
+            # We multiply P_powered with itself, giving powers of 2: P^2 = PP, P^4 = (P^2)(P^2), ...
+            new_P_powered: torch.Tensor = torch.mm(P_powered, P_powered)
+            # The wavelet operator is the *difference* between diffusion scales i+1 and i
+            psi_i = new_P_powered - P_powered
+            # The first-order scattering coefficient is given by psi X, followed by nonlinearity
+            # F1 accumulates first-order features
+            scattering_coef_i = torch.abs(torch.mm(psi_i, X)).unsqueeze(0)
+            F1.append(scattering_coef_i)
+            F2.append(
+                torch.abs(
+                    torch.matmul(PSI, scattering_coef_i.expand(PSI.shape[0], -1, -1))
+                )
+            )
 
-    def first_order_feature(self, diff_list):
-        F1 = torch.cat(
-            [
-                torch.abs(diff_list[i - 1] - diff_list[i])
-                for i in range(1, len(diff_list))
-            ],
-            1,
-        )
-        return F1
+            # We accumulate the different scales into a single operator for scales 1 to i+1
+            # Note that we make this a *tensor*, since we want to use it to calculate
+            # second-order features |psi_i @ |psi_j X| |
+            # We only want the *off-diagonal* second-order elements, so we do this after F2
+            PSI = torch.cat((PSI, psi_i.unsqueeze(0)), 0)
 
-    def second_order_feature(self, diff_list):
-        U = torch.cat(diff_list, dim=1)
-        U_diff_list = self.diffuse(U)
+            # Reset for next loop
+            P_powered = new_P_powered
 
-        results = []
-        for j in range(self.J):
-            col_start = j * self.num_feats
-            col_end = (j + 1) * self.num_feats
-            for j_prime in range(j + 1, self.J):
-                block_jp = U_diff_list[j_prime][:, col_start:col_end]
-                block_jp_1 = U_diff_list[j_prime - 1][:, col_start:col_end]
-                results.append(torch.abs(block_jp - block_jp_1))
-        return torch.cat(results, dim=1)
-
-    def generate_timepoint_features(self, batch):
-        diff_list = self.diffuse()
-        F0 = diff_list[-1]
-        F1 = self.first_order_feature(diff_list)
-        F2 = self.second_order_feature(diff_list)
-        feats = torch.cat([F0, F1, F2], dim=1)
-
-        if self.pooling:
-            feats = global_mean_pool(feats, batch)
-
-        return feats
-
-    def diffusion_only(self, batch):
-        diff_list = self.diffuse()  # list of length J
-
-        feats = torch.cat(diff_list, dim=1)
+        F0 = torch.mm(P_powered, X).unsqueeze(0)
+        features = torch.cat([F0, *F1, *F2])
 
         if self.pooling:
-            feats = global_mean_pool(feats, batch)
+            # We *sum* instead of mean, since we want to ignore masked-out nodes
+            features = features.sum(dim=1) / mask.sum()
 
-        return feats
+        return features.flatten()
+
+    # Batch over the graphs, and batch over the alphas
+    forward = torch.vmap(
+        torch.vmap(generate_timepoint_features, in_dims=(None, 0, 0, 0)),
+        in_dims=(None, 0, 0, 0),
+    )
