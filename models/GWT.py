@@ -69,9 +69,11 @@ class GraphWaveletTransform(nn.Module):
 
         if self.pooling:
             # We *sum* instead of mean, since we want to ignore masked-out nodes
-            features = features.sum(dim=1) / mask.sum()
-
-        return features.flatten()
+            features = (features.sum(dim=1) / mask.sum()).flatten()
+        else:
+            features = features.permute(1, 0, 2).reshape(num_points, -1)
+    
+        return features
 
     # Batch over the graphs, and batch over the alphas
     forward = torch.vmap(

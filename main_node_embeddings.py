@@ -37,6 +37,7 @@ parser.add_argument(
 )
 parser.add_argument("--sigma", type=float, default=0.5, help="Bandwidth")
 parser.add_argument("--K", type=int, default=1, help="Order of simplicial complex")
+parser.add_argument("--J", type=int, default=3, help="Order of simplicial complex")
 parser.add_argument(
     "--hidden_dim", type=int, default=256, help="Hidden dim for the MLP Autoencoder"
 )
@@ -66,38 +67,15 @@ else:
 
 
 def collate_fn(batch):
-    # We do this because DataParallel requires an explicit batch dimension
-    # So we need our data to be a tensor, but the different point clouds have different
-    # number of points, so we use nested tensors
-    # We also want to ensure each GPU gets a similar amount of data
-    # So we split the batch into segments which should have roughly even amount of data.
-    n_gpus = torch.cuda.device_count()
-    if n_gpus == 0:
-        return torch.nested.as_nested_tensor(
-            [x[0] for x in batch], layout=torch.jagged
-        ), torch.nested.as_nested_tensor([x[1] for x in batch], layout=torch.jagged)
-
-    # We have n_gpus buckets, try and fill them up evenly
-    max_per_bucket = len(batch) // n_gpus
-    buckets = [[] for _ in range(n_gpus)]
-    scores = [0 for _ in range(n_gpus)]
-    for x in batch:
-        min_idx = scores.index(min(scores))
-        buckets[min_idx].append(x)
-        if len(buckets[min_idx]) == max_per_bucket:
-            # Bucket is full, set score to infinity so we don't add any more
-            scores[min_idx] = float("inf")
-        else:
-            # The 'score' is the number of points *squared* since the W matrix has N^2 entries
-            scores[min_idx] += x[0].shape[0] ** 2
-
     gene = torch.nested.as_nested_tensor(
-        [x[0] for bucket in buckets for x in bucket], layout=torch.jagged
-    )
+        [x[0] for x in batch], layout=torch.jagged
+    ).to_padded_tensor(padding=0.0)
+    gene_mask = gene.sum(-1) != 0
     spatial = torch.nested.as_nested_tensor(
-        [x[0] for bucket in buckets for x in bucket], layout=torch.jagged
-    )
-    return gene, spatial
+        [x[1] for x in batch], layout=torch.jagged
+    ).to_padded_tensor(padding=0.0)
+    spatial_mask = spatial.sum(-1) != 0
+    return gene, gene_mask, spatial, spatial_mask
 
 
 def test(
@@ -162,8 +140,13 @@ def train(
             autoenc.train()
             opt.zero_grad()
             minibatches_per_batch = args.n_accumulate
-            for i, (batch_gene, batch_spatial) in enumerate(train_loader, start=1):
-                X_spatial, X_gene = model_spatial(batch_spatial), model_gene(batch_gene)
+            for i, (batch_gene, mask_gene, batch_spatial, mask_spatial) in enumerate(
+                train_loader, start=1
+            ):
+                X_spatial, X_gene = (
+                    model_spatial(batch_spatial, mask_spatial),
+                    model_gene(batch_gene, mask_gene),
+                )
                 # Embedding of shape (n_nodes, n_spatial_embedding_dims + n_gene_embedding_dims)
                 embedding = torch.cat([X_spatial, X_gene], 1)
                 reconstructed = autoenc(embedding)
@@ -221,6 +204,7 @@ def main():
             n_weights=1,
             threshold=args.gene_threshold,
             K=args.K,
+            J=args.J,
             device=args.device,
             sigma=args.sigma,
             pooling=False,
@@ -234,6 +218,7 @@ def main():
             n_weights=1,
             threshold=args.gene_threshold,
             K=args.K,
+            J=args.J,
             device=args.device,
             sigma=args.sigma,
             pooling=False,
@@ -243,8 +228,14 @@ def main():
     )
     with torch.no_grad():
         input_dim = (
-            model_spatial([PC_spatial[0][:5].to(args.device)]).shape[1]
-            + model_gene([PC_gene[0][:5].to(args.device)]).shape[1]
+            model_spatial(
+                PC_spatial[0][:5].unsqueeze(0).to(args.device),
+                torch.zeros((1, 5), dtype=torch.bool).to(args.device),
+            ).shape[1]
+            + model_gene(
+                PC_gene[0][:5].unsqueeze(0).to(args.device),
+                torch.zeros((1, 5), dtype=torch.bool).to(args.device),
+            ).shape[1]
         )
     if SMOKE_TEST:
         PC_gene, PC_spatial = (

@@ -89,8 +89,15 @@ class GraphFeatLearningLayer(nn.Module):
         features = self.gwt(
             W, X_bar, mask.unsqueeze(1).expand((-1, self.n_weights, -1))
         )
-        # Reshape to (B, n_weights * feature_dim)
-        return features.view(features.size(0), -1)
+        if self.gwt.pooling:
+            # Reshape to (B, n_weights * feature_dim)
+            return features.view(features.size(0), -1)
+        else:
+            # If no pooling, we remove the n_weights dimension (which should be 1)
+            # We then only select the nodes according to the mask
+            # This gives a tensor of shape (sum(num_points_i), feature_dim)
+            # where num_points_i is the number of valid points in point_clouds[i] (or equivalently mask[i].sum())
+            return features.squeeze(1)[mask]
 
 
 class SimplicialFeatLearningLayerTri(nn.Module):
