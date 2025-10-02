@@ -85,9 +85,8 @@ def test(
     test_loader: DataLoader,
 ):
     model_gene.eval(), model_spatial.eval(), autoenc.eval()
-    loss_fn = torch.nn.MSELoss(reduction="sum")
     total_loss = 0
-    total_nodes = 0
+    weight_sum = 0
     with torch.no_grad():
         for batch_gene, mask_gene, batch_spatial, mask_spatial in test_loader:
             X_spatial, X_gene = (
@@ -100,8 +99,7 @@ def test(
             points_per_cloud = (mask_gene * mask_gene.sum(1, keepdim=True))[
                 mask_gene
             ]
-            # Weights sum to 1
-            weights = points_per_cloud / points_per_cloud.sum()
+            weights = points_per_cloud
             loss = (
                 weights
                 * torch.nn.functional.mse_loss(
@@ -109,11 +107,11 @@ def test(
                 ).sum(1) # Sum over feature dim
             ).sum()
             total_loss += loss.detach()
-            total_nodes += len(reconstructed)
+            weight_sum += weights.sum()
             torch.cuda.empty_cache()
             gc.collect()
 
-    return total_loss / (total_nodes * embedding.shape[1])
+    return total_loss / weight_sum
 
 
 def train(
@@ -144,7 +142,6 @@ def train(
         shuffle=False,
         collate_fn=collate_fn,
     )
-    loss_fn = torch.nn.MSELoss()
     total_n_batches = len(train_loader)
     with tqdm(range(args.num_epochs)) as tq:
         for epoch in tq:
