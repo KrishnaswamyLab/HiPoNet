@@ -89,6 +89,12 @@ def test(
     weight_sum = 0
     with torch.no_grad():
         for batch_gene, mask_gene, batch_spatial, mask_spatial in test_loader:
+            batch_gene, mask_gene, batch_spatial, mask_spatial = (
+                    batch_gene.to(args.device),
+                    mask_gene.to(args.device),
+                    batch_spatial.to(args.device),
+                    mask_spatial.to(args.device),
+                )
             X_spatial, X_gene = (
                 model_spatial(batch_spatial, mask_spatial),
                 model_gene(batch_gene, mask_gene),
@@ -96,15 +102,13 @@ def test(
             # Embedding of shape (n_nodes, n_spatial_embedding_dims + n_gene_embedding_dims)
             embedding = torch.cat([X_spatial, X_gene], 1)
             reconstructed = autoenc(embedding)
-            points_per_cloud = (mask_gene * mask_gene.sum(1, keepdim=True))[
-                mask_gene
-            ]
+            points_per_cloud = (mask_gene * mask_gene.sum(1, keepdim=True))[mask_gene]
             weights = points_per_cloud
             loss = (
                 weights
                 * torch.nn.functional.mse_loss(
                     reconstructed, embedding, reduction="none"
-                ).sum(1) # Sum over feature dim
+                ).sum(1)  # Sum over feature dim
             ).sum()
             total_loss += loss.detach()
             weight_sum += weights.sum()
@@ -153,6 +157,12 @@ def train(
             for i, (batch_gene, mask_gene, batch_spatial, mask_spatial) in enumerate(
                 train_loader, start=1
             ):
+                batch_gene, mask_gene, batch_spatial, mask_spatial = (
+                    batch_gene.to(args.device),
+                    mask_gene.to(args.device),
+                    batch_spatial.to(args.device),
+                    mask_spatial.to(args.device),
+                )
                 X_spatial, X_gene = (
                     model_spatial(batch_spatial, mask_spatial),
                     model_gene(batch_gene, mask_gene),
@@ -161,7 +171,7 @@ def train(
                 embedding = torch.cat([X_spatial, X_gene], 1)
                 reconstructed = autoenc(embedding)
 
-                # We don't want to naively average over all nodes - we want to do weighted average based on 
+                # We don't want to naively average over all nodes - we want to do weighted average based on
                 # This ensures we weight each *point cloud* equally (instead of each node)
                 points_per_cloud = (mask_gene * mask_gene.sum(1, keepdim=True))[
                     mask_gene
@@ -172,7 +182,7 @@ def train(
                     weights
                     * torch.nn.functional.mse_loss(
                         reconstructed, embedding, reduction="none"
-                    ).sum(1) # Sum over feature dim
+                    ).sum(1)  # Sum over feature dim
                 ).sum()
 
                 loss /= minibatches_per_batch
@@ -227,7 +237,7 @@ def main():
         HiPoNet(
             dimension=PC_spatial[0].shape[1],
             n_weights=1,
-            threshold=args.gene_threshold,
+            threshold=args.spatial_threshold,
             K=args.K,
             J=args.J,
             device=args.device,
