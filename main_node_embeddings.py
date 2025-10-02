@@ -89,12 +89,25 @@ def test(
     total_loss = 0
     total_nodes = 0
     with torch.no_grad():
-        for batch_gene, batch_spatial in test_loader:
-            X_spatial, X_gene = model_spatial(batch_spatial), model_gene(batch_gene)
+        for batch_gene, mask_gene, batch_spatial, mask_spatial in test_loader:
+            X_spatial, X_gene = (
+                model_spatial(batch_spatial, mask_spatial),
+                model_gene(batch_gene, mask_gene),
+            )
             # Embedding of shape (n_nodes, n_spatial_embedding_dims + n_gene_embedding_dims)
             embedding = torch.cat([X_spatial, X_gene], 1)
             reconstructed = autoenc(embedding)
-            loss = loss_fn(embedding, reconstructed)
+            points_per_cloud = (mask_gene * mask_gene.sum(1, keepdim=True))[
+                mask_gene
+            ]
+            # Weights sum to 1
+            weights = points_per_cloud / points_per_cloud.sum()
+            loss = (
+                weights
+                * torch.nn.functional.mse_loss(
+                    reconstructed, embedding, reduction="none"
+                ).sum(1) # Sum over feature dim
+            ).sum()
             total_loss += loss.detach()
             total_nodes += len(reconstructed)
             torch.cuda.empty_cache()
@@ -150,7 +163,22 @@ def train(
                 # Embedding of shape (n_nodes, n_spatial_embedding_dims + n_gene_embedding_dims)
                 embedding = torch.cat([X_spatial, X_gene], 1)
                 reconstructed = autoenc(embedding)
-                loss = loss_fn(embedding, reconstructed) / minibatches_per_batch
+
+                # We don't want to naively average over all nodes - we want to do weighted average based on 
+                # This ensures we weight each *point cloud* equally (instead of each node)
+                points_per_cloud = (mask_gene * mask_gene.sum(1, keepdim=True))[
+                    mask_gene
+                ]
+                # Weights sum to 1
+                weights = points_per_cloud / points_per_cloud.sum()
+                loss = (
+                    weights
+                    * torch.nn.functional.mse_loss(
+                        reconstructed, embedding, reduction="none"
+                    ).sum(1) # Sum over feature dim
+                ).sum()
+
+                loss /= minibatches_per_batch
                 loss.backward()
 
                 if (i % args.n_accumulate == 0) or i == total_n_batches:
@@ -239,8 +267,8 @@ def main():
         )
     if SMOKE_TEST:
         PC_gene, PC_spatial = (
-            [PC_gene[i][:100] for i in range(20)],
-            [PC_spatial[i][:100] for i in range(20)],
+            [PC_gene[i][: 100 + i] for i in range(20)],
+            [PC_spatial[i][: 100 + i] for i in range(20)],
         )
     autoencoder = MLPAutoEncoder(
         input_dim, args.hidden_dim, args.embedding_dim, args.num_layers, bn=False
