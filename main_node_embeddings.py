@@ -225,7 +225,7 @@ def train(
             test_loss = test(model, test_loader)
             if test_loss < best_test_loss:
                 best_test_loss = test_loss
-                save_model(model, name, weights_save_loc)
+                save_model(model, "model", weights_save_loc)
                 torch.save(
                     {
                         "train_idx": torch.tensor(train_idx),
