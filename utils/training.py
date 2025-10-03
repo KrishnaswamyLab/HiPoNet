@@ -1,4 +1,5 @@
 import torch
+import pathlib
 
 
 def collate_fn(batch):
@@ -10,3 +11,7 @@ def collate_fn(batch):
     labels = torch.LongTensor([x[1] for x in batch])
 
     return input_tensor, mask, labels
+
+
+def save_model(model: torch.nn.Module, name: str, location: pathlib.Path):
+    torch.save(model.state_dict(), location / f"{name}.pt")

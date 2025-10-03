@@ -1,6 +1,7 @@
 import torch
 from tqdm import tqdm
 import wandb
+import pathlib
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 import numpy as np
@@ -8,11 +9,15 @@ import numpy as np
 from models.graph_learning import HiPoNet, MLPAutoEncoder
 from argparse import ArgumentParser
 from utils.read_data import load_data
+from utils.training import save_model
 
 import gc
 import os
 
 SMOKE_TEST = os.environ.get("SMOKE_TEST")
+WEIGHTS_SAVE_LOC = pathlib.Path(__file__).parent / "model_weights"
+if not WEIGHTS_SAVE_LOC.exists():
+    WEIGHTS_SAVE_LOC.mkdir()
 
 gc.enable()
 
@@ -90,11 +95,11 @@ def test(
     with torch.no_grad():
         for batch_gene, mask_gene, batch_spatial, mask_spatial in test_loader:
             batch_gene, mask_gene, batch_spatial, mask_spatial = (
-                    batch_gene.to(args.device),
-                    mask_gene.to(args.device),
-                    batch_spatial.to(args.device),
-                    mask_spatial.to(args.device),
-                )
+                batch_gene.to(args.device),
+                mask_gene.to(args.device),
+                batch_spatial.to(args.device),
+                mask_spatial.to(args.device),
+            )
             X_spatial, X_gene = (
                 model_spatial(batch_spatial, mask_spatial),
                 model_gene(batch_gene, mask_gene),
@@ -124,6 +129,7 @@ def train(
     autoenc: MLPAutoEncoder,
     PC_gene: torch.tensor,
     PC_spatial: torch.tensor,
+    weights_save_loc: pathlib.Path | None = None,
 ):
     print(args)
     opt = torch.optim.AdamW(
@@ -147,6 +153,7 @@ def train(
         collate_fn=collate_fn,
     )
     total_n_batches = len(train_loader)
+    best_test_loss = float("inf")
     with tqdm(range(args.num_epochs)) as tq:
         for epoch in tq:
             model_gene.train()
@@ -189,6 +196,12 @@ def train(
                 loss.backward()
 
                 if (i % args.n_accumulate == 0) or i == total_n_batches:
+                    for model in [model_spatial, model_gene, autoenc]:
+                        for name, param in model.named_parameters():
+                            if param.grad is not None:
+                                wandb.log(
+                                    {f"{name}.grad": param.grad.norm()}, step=epoch + 1
+                                )
                     opt.step()
                     opt.zero_grad()
                     minibatches_per_batch = min(args.n_accumulate, total_n_batches - i)
@@ -198,20 +211,31 @@ def train(
                 gc.collect()
 
             test_loss = test(model_gene, model_spatial, autoenc, test_loader)
+            if test_loss < best_test_loss:
+                best_test_loss = test_loss
+                for model, name in [
+                    (model_gene, "model_gene"),
+                    (model_spatial, "model_spatial"),
+                    (autoenc, "autoenc"),
+                ]:
+                    save_model(model, name, weights_save_loc)
+                torch.save(
+                    {
+                        "train_idx": torch.tensor(train_idx),
+                        "test_idx": torch.tensor(test_idx),
+                    },
+                    weights_save_loc / "split_idx.pt",
+                )
 
             torch.cuda.empty_cache()
             gc.collect()
-
-            for model in [model_spatial, model_gene, autoenc]:
-                for name, param in model.named_parameters():
-                    if param.grad is not None:
-                        wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
 
             loss_float = loss.detach().item()
             wandb.log(
                 {
                     "train_loss": loss_float,
                     "test_loss": test_loss,
+                    "best_test_loss": best_test_loss,
                 },
                 step=epoch + 1,
             )
@@ -277,10 +301,14 @@ def main():
             [PC_gene[i][: 100 + i] for i in range(20)],
             [PC_spatial[i][: 100 + i] for i in range(20)],
         )
+        weights_save_loc = None
     autoencoder = MLPAutoEncoder(
         input_dim, args.hidden_dim, args.embedding_dim, args.num_layers, bn=False
     ).to(args.device)
-    train(model_gene, model_spatial, autoencoder, PC_gene, PC_spatial)
+
+    weights_save_loc = WEIGHTS_SAVE_LOC / config["slurm_job_id"]
+    weights_save_loc.mkdir(exist_ok=True)
+    train(model_gene, model_spatial, autoencoder, PC_gene, PC_spatial, weights_save_loc)
 
 
 if __name__ == "__main__":
