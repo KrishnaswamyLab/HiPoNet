@@ -256,7 +256,7 @@ def main():
         mode="disabled" if args.disable_wb else None,
     )
 
-    PC_gene, PC_spatial = load_data(args.raw_dir, args.full)
+    PC_gene, PC_spatial, _ = load_data(args.raw_dir, args.full)
     model_spatial = (
         HiPoNet(
             dimension=PC_spatial[0].shape[1],

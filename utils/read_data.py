@@ -77,7 +77,9 @@ def load_data(raw_dir, full):
             X.append(torch.load(file))
         for file in pathlib.Path(raw_dir + "_spatial/").glob("*.pt"):
             X_spatial.append(torch.load(file))
-        return X, X_spatial
+        for file in pathlib.Path(raw_dir + "_labels/").glob("*.pt"):
+            labels.append(torch.load(file))
+        return X, X_spatial, labels
     else:
         raise ValueError(f"Dataset {data_name} not recognized.")
     return PCs, labels, num_labels
