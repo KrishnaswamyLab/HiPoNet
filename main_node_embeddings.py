@@ -71,6 +71,35 @@ else:
     args.device = "cpu"
 
 
+class NodeEmbeddingModel(torch.nn.Module):
+    def __init__(
+        self,
+        gene_model: HiPoNet,
+        spatial_model: HiPoNet,
+        autoencoder: MLPAutoEncoder,
+        num_embedding_features: int,
+    ):
+        super().__init__()
+        self.gene_model = gene_model
+        self.spatial_model = spatial_model
+        # We need to add batchnorm, otherwise the model can just learn to make things really close to 0
+        self.bn = torch.nn.BatchNorm1d(num_embedding_features)
+        self.autoencoder = autoencoder
+
+    def forward(self, gene_batch, gene_mask, spatial_batch, spatial_mask):
+        gene_embedding = self.gene_model(gene_batch, gene_mask)
+        spatial_embedding = self.spatial_model(spatial_batch, spatial_mask)
+        embedding = self.bn(torch.cat([gene_embedding, spatial_embedding], 1))
+        reconstructed_embedding = self.autoencoder(embedding)
+        return embedding, reconstructed_embedding
+
+    def encode(self, gene_batch, gene_mask, spatial_batch, spatial_mask):
+        gene_embedding = self.gene_model(gene_batch, gene_mask)
+        spatial_embedding = self.spatial_model(spatial_batch, spatial_mask)
+        embedding = self.bn(torch.cat([gene_embedding, spatial_embedding], 1))
+        return self.autoencoder.encode(embedding)
+
+
 def collate_fn(batch):
     gene = torch.nested.as_nested_tensor(
         [x[0] for x in batch], layout=torch.jagged
@@ -84,12 +113,10 @@ def collate_fn(batch):
 
 
 def test(
-    model_gene: HiPoNet,
-    model_spatial: HiPoNet,
-    autoenc: MLPAutoEncoder,
+    model: NodeEmbeddingModel,
     test_loader: DataLoader,
 ):
-    model_gene.eval(), model_spatial.eval(), autoenc.eval()
+    model.eval()
     total_loss = 0
     weight_sum = 0
     with torch.no_grad():
@@ -100,13 +127,9 @@ def test(
                 batch_spatial.to(args.device),
                 mask_spatial.to(args.device),
             )
-            X_spatial, X_gene = (
-                model_spatial(batch_spatial, mask_spatial),
-                model_gene(batch_gene, mask_gene),
+            embedding, reconstructed = model(
+                batch_gene, mask_gene, batch_spatial, mask_spatial
             )
-            # Embedding of shape (n_nodes, n_spatial_embedding_dims + n_gene_embedding_dims)
-            embedding = torch.cat([X_spatial, X_gene], 1)
-            reconstructed = autoenc(embedding)
             points_per_cloud = (mask_gene * mask_gene.sum(1, keepdim=True))[mask_gene]
             weights = points_per_cloud
             loss = (
@@ -124,18 +147,14 @@ def test(
 
 
 def train(
-    model_gene: HiPoNet,
-    model_spatial: HiPoNet,
-    autoenc: MLPAutoEncoder,
+    model: NodeEmbeddingModel,
     PC_gene: torch.tensor,
     PC_spatial: torch.tensor,
     weights_save_loc: pathlib.Path | None = None,
 ):
     print(args)
     opt = torch.optim.AdamW(
-        list(model_gene.parameters())
-        + list(model_spatial.parameters())
-        + list(autoenc.parameters()),
+        list(model.parameters()),
         lr=args.lr,
         weight_decay=args.wd,
     )
@@ -156,9 +175,7 @@ def train(
     best_test_loss = float("inf")
     with tqdm(range(args.num_epochs)) as tq:
         for epoch in tq:
-            model_gene.train()
-            model_spatial.train()
-            autoenc.train()
+            model.train()
             opt.zero_grad()
             minibatches_per_batch = args.n_accumulate
             for i, (batch_gene, mask_gene, batch_spatial, mask_spatial) in enumerate(
@@ -170,13 +187,9 @@ def train(
                     batch_spatial.to(args.device),
                     mask_spatial.to(args.device),
                 )
-                X_spatial, X_gene = (
-                    model_spatial(batch_spatial, mask_spatial),
-                    model_gene(batch_gene, mask_gene),
+                embedding, reconstructed = model(
+                    batch_gene, mask_gene, batch_spatial, mask_spatial
                 )
-                # Embedding of shape (n_nodes, n_spatial_embedding_dims + n_gene_embedding_dims)
-                embedding = torch.cat([X_spatial, X_gene], 1)
-                reconstructed = autoenc(embedding)
 
                 # We don't want to naively average over all nodes - we want to do weighted average based on
                 # This ensures we weight each *point cloud* equally (instead of each node)
@@ -196,12 +209,11 @@ def train(
                 loss.backward()
 
                 if (i % args.n_accumulate == 0) or i == total_n_batches:
-                    for model in [model_spatial, model_gene, autoenc]:
-                        for name, param in model.named_parameters():
-                            if param.grad is not None:
-                                wandb.log(
-                                    {f"{name}.grad": param.grad.norm()}, step=epoch + 1
-                                )
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            wandb.log(
+                                {f"{name}.grad": param.grad.norm()}, step=epoch + 1
+                            )
                     opt.step()
                     opt.zero_grad()
                     minibatches_per_batch = min(args.n_accumulate, total_n_batches - i)
@@ -210,15 +222,10 @@ def train(
                 torch.cuda.empty_cache()
                 gc.collect()
 
-            test_loss = test(model_gene, model_spatial, autoenc, test_loader)
+            test_loss = test(model, test_loader)
             if test_loss < best_test_loss:
                 best_test_loss = test_loss
-                for model, name in [
-                    (model_gene, "model_gene"),
-                    (model_spatial, "model_spatial"),
-                    (autoenc, "autoenc"),
-                ]:
-                    save_model(model, name, weights_save_loc)
+                save_model(model, name, weights_save_loc)
                 torch.save(
                     {
                         "train_idx": torch.tensor(train_idx),
@@ -306,9 +313,11 @@ def main():
         input_dim, args.hidden_dim, args.embedding_dim, args.num_layers, bn=False
     ).to(args.device)
 
+    model = NodeEmbeddingModel(model_gene, model_spatial, autoencoder, input_dim).to(args.device)
+
     weights_save_loc = WEIGHTS_SAVE_LOC / config["slurm_job_id"]
     weights_save_loc.mkdir(exist_ok=True)
-    train(model_gene, model_spatial, autoencoder, PC_gene, PC_spatial, weights_save_loc)
+    train(model, PC_gene, PC_spatial, weights_save_loc)
 
 
 if __name__ == "__main__":
