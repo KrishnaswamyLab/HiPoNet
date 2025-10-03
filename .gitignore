@@ -45,3 +45,4 @@ LICENSE.md
 *.pth
 *scratch.*
 data/*
+model_weights/*
