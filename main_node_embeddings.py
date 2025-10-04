@@ -57,6 +57,23 @@ parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
 parser.add_argument("--gpu", type=int, default=0, help="GPU index")
 parser.add_argument("--disable_wb", action="store_true", help="Disable wandb logging")
 parser.add_argument(
+    "--reconstruct_original",
+    action="store_true",
+    help="If true, reconstruction loss is wrt original point cloud, not the wavelet coefficients",
+)
+parser.add_argument(
+    "--ignore_alphas", action="store_true", help="Fix the alpha params to 1"
+)
+parser.add_argument(
+    "--alpha_connectivity_only",
+    action="store_true",
+    help="only use alphas for connectivity, not node features",
+)
+parser.add_argument(
+    "--normalize_alphas",
+    action="store_true",
+)
+parser.add_argument(
     "--n_accumulate",
     default=1,
     type=int,
@@ -115,6 +132,7 @@ def collate_fn(batch):
 def test(
     model: NodeEmbeddingModel,
     test_loader: DataLoader,
+    reconstruct_original: bool,
 ):
     model.eval()
     total_loss = 0
@@ -132,10 +150,15 @@ def test(
             )
             points_per_cloud = (mask_gene * mask_gene.sum(1, keepdim=True))[mask_gene]
             weights = points_per_cloud
+            target = (
+                torch.cat(batch_gene[mask_gene], batch_spatial[mask_spatial], dim=1)
+                if reconstruct_original
+                else embedding
+            )
             loss = (
                 weights
                 * torch.nn.functional.mse_loss(
-                    reconstructed, embedding, reduction="none"
+                    reconstructed, target, reduction="none"
                 ).sum(1)  # Sum over feature dim
             ).sum()
             total_loss += loss.detach()
@@ -150,6 +173,7 @@ def train(
     model: NodeEmbeddingModel,
     PC_gene: torch.tensor,
     PC_spatial: torch.tensor,
+    reconstruct_original: bool,
     weights_save_loc: pathlib.Path | None = None,
 ):
     print(args)
@@ -198,10 +222,15 @@ def train(
                 ]
                 # Weights sum to 1
                 weights = points_per_cloud / points_per_cloud.sum()
+                target = (
+                    torch.cat(batch_gene[mask_gene], batch_spatial[mask_spatial], dim=1)
+                    if reconstruct_original
+                    else embedding
+                )
                 loss = (
                     weights
                     * torch.nn.functional.mse_loss(
-                        reconstructed, embedding, reduction="none"
+                        reconstructed, target, reduction="none"
                     ).sum(1)  # Sum over feature dim
                 ).sum()
 
@@ -222,7 +251,7 @@ def train(
                 torch.cuda.empty_cache()
                 gc.collect()
 
-            test_loss = test(model, test_loader)
+            test_loss = test(model, test_loader, reconstruct_original)
             if test_loss < best_test_loss:
                 best_test_loss = test_loss
                 save_model(model, "model", weights_save_loc)
@@ -274,6 +303,9 @@ def main():
             device=args.device,
             sigma=args.sigma,
             pooling=False,
+            normalize_alphas=args.normalize_alphas,
+            use_alphas_for_connectivity_only=args.alpha_connectivity_only,
+            ignore_alphas=args.ignore_alphas,
         )
         .to(args.device)
         .float()
@@ -288,6 +320,9 @@ def main():
             device=args.device,
             sigma=args.sigma,
             pooling=False,
+            normalize_alphas=args.normalize_alphas,
+            use_alphas_for_connectivity_only=args.alpha_connectivity_only,
+            ignore_alphas=args.ignore_alphas,
         )
         .to(args.device)
         .float()
@@ -313,11 +348,13 @@ def main():
         input_dim, args.hidden_dim, args.embedding_dim, args.num_layers, bn=False
     ).to(args.device)
 
-    model = NodeEmbeddingModel(model_gene, model_spatial, autoencoder, input_dim).to(args.device)
+    model = NodeEmbeddingModel(model_gene, model_spatial, autoencoder, input_dim).to(
+        args.device
+    )
 
     weights_save_loc = WEIGHTS_SAVE_LOC / config["slurm_job_id"]
     weights_save_loc.mkdir(exist_ok=True)
-    train(model, PC_gene, PC_spatial, weights_save_loc)
+    train(model, PC_gene, PC_spatial, args.reconstruct_original, weights_save_loc)
 
 
 if __name__ == "__main__":
