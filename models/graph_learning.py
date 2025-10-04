@@ -527,7 +527,16 @@ class HiPoNet(nn.Module):
         self.dimension = dimension
         if K == 1:
             self.layer = GraphFeatLearningLayer(
-                n_weights, dimension, threshold, sigma, J, device, pooling=pooling
+                n_weights,
+                dimension,
+                threshold,
+                sigma,
+                J,
+                device,
+                pooling=pooling,
+                normalize_alphas=normalize_alphas,
+                ignore_alphas=ignore_alphas,
+                use_alphas_for_connectivity_only=use_alphas_for_connectivity_only,
             )
         elif K == 2:
             self.layer = SimplicialFeatLearningLayerTri(
