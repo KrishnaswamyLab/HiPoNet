@@ -99,21 +99,19 @@ class NodeEmbeddingModel(torch.nn.Module):
         super().__init__()
         self.gene_model = gene_model
         self.spatial_model = spatial_model
-        # We need to add batchnorm, otherwise the model can just learn to make things really close to 0
-        self.bn = torch.nn.BatchNorm1d(num_embedding_features)
         self.autoencoder = autoencoder
 
     def forward(self, gene_batch, gene_mask, spatial_batch, spatial_mask):
         gene_embedding = self.gene_model(gene_batch, gene_mask)
         spatial_embedding = self.spatial_model(spatial_batch, spatial_mask)
-        embedding = self.bn(torch.cat([gene_embedding, spatial_embedding], 1))
+        embedding = torch.cat([gene_embedding, spatial_embedding], 1)
         reconstructed_embedding = self.autoencoder(embedding)
         return embedding, reconstructed_embedding
 
     def encode(self, gene_batch, gene_mask, spatial_batch, spatial_mask):
         gene_embedding = self.gene_model(gene_batch, gene_mask)
         spatial_embedding = self.spatial_model(spatial_batch, spatial_mask)
-        embedding = self.bn(torch.cat([gene_embedding, spatial_embedding], 1))
+        embedding = torch.cat([gene_embedding, spatial_embedding], 1)
         return self.autoencoder.encode(embedding)
 
 
