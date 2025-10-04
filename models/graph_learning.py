@@ -37,7 +37,14 @@ def compute_diffusion_from_dist(W, sigma, threshold, mask):
     return W
 
 
-def compute_diffusion_matrix(point_clouds, alphas, sigma, threshold, mask):
+def compute_diffusion_matrix(
+    point_clouds: torch.Tensor,
+    alphas: torch.Tensor,
+    sigma,
+    threshold,
+    mask: torch.Tensor,
+    use_alphas_for_connectivity_only=False,
+):
     """Given a batch of point clouds and a set of alphas, compute the diffusion matrices.
 
     point_clouds: (B, N, d)
@@ -52,6 +59,9 @@ def compute_diffusion_matrix(point_clouds, alphas, sigma, threshold, mask):
     X_bar = point_clouds.unsqueeze(1) * alphas[None, :, None, :]
     W = batched_compute_dist(X_bar)
     W = compute_diffusion_from_dist(W, sigma, threshold, mask)
+    if use_alphas_for_connectivity_only:
+        # Instead of X_bar, just add the n_weights dimension and use the point clouds
+        return W, point_clouds.unsqueeze(1).expand(-1, alphas.shape[0], -1, -1)
     return W, X_bar
 
 
@@ -64,26 +74,53 @@ class GraphFeatLearningLayer(nn.Module):
         sigma: int,
         J: int,
         device,
-        pooling: bool = True,
+        pooling: bool,
+        normalize_alphas: bool,
+        ignore_alphas: bool,
+        use_alphas_for_connectivity_only: bool,
     ):
         super().__init__()
-        self.alphas = nn.Parameter(
-            torch.rand((n_weights, dimension)).to(device),
-            requires_grad=True,
-        )
+
         self.n_weights = n_weights
+        self.dimension = dimension
         self.threshold = threshold
         self.device = device
         self.gwt = GraphWaveletTransform(J, device, pooling=pooling)
         self.sigma = sigma
+        self.normalize_alphas = normalize_alphas
+        self.ignore_alphas = ignore_alphas
+        self.use_alphas_for_connectivity_only = use_alphas_for_connectivity_only
+
+        if self.ignore_alphas:
+            self.alphas = nn.Parameter(
+                torch.ones((n_weights, dimension)).to(device),
+                requires_grad=False,
+            )
+        else:
+            self.alphas = nn.Parameter(
+                torch.rand((n_weights, dimension)).to(device),
+                requires_grad=True,
+            )
 
         assert pooling or (self.n_weights == 1), (
             "n_weights > 1 not supported without pooling"
         )
 
     def forward(self, point_clouds, mask):
+        if self.normalize_alphas:
+            # When alpha entries normally distributed, they have norm ~ sqrt(dimension)
+            # In order to avoid having alpha -> 0, we normalize the entries to keep the norm fixed at sqrt(dimension)
+            norm_value = self.dimension**0.5
+            alphas = norm_value * self.alphas / self.alphas.norm(dim=1, keepdim=True)
+        else:
+            alphas = self.alphas
         W, X_bar = compute_diffusion_matrix(
-            point_clouds, self.alphas, self.sigma, self.threshold, mask
+            point_clouds,
+            alphas,
+            self.sigma,
+            self.threshold,
+            mask,
+            self.use_alphas_for_connectivity_only,
         )
         # Mask has shape (B, N), expand to (B, n_weights, N) to match W and X_bar
         features = self.gwt(
@@ -473,7 +510,18 @@ class SimplicialFeatLearningLayerTetra(nn.Module):
 
 class HiPoNet(nn.Module):
     def __init__(
-        self, dimension, n_weights, threshold, K, J, device, sigma, pooling=True
+        self,
+        dimension,
+        n_weights,
+        threshold,
+        K,
+        J,
+        device,
+        sigma,
+        pooling=True,
+        normalize_alphas=False,
+        ignore_alphas=False,
+        use_alphas_for_connectivity_only=False,
     ):
         super(HiPoNet, self).__init__()
         self.dimension = dimension
