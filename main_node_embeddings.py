@@ -151,7 +151,7 @@ def test(
             points_per_cloud = (mask_gene * mask_gene.sum(1, keepdim=True))[mask_gene]
             weights = points_per_cloud
             target = (
-                torch.cat(batch_gene[mask_gene], batch_spatial[mask_spatial], dim=1)
+                torch.cat((batch_gene[mask_gene], batch_spatial[mask_spatial]), dim=1)
                 if reconstruct_original
                 else embedding
             )
@@ -223,7 +223,9 @@ def train(
                 # Weights sum to 1
                 weights = points_per_cloud / points_per_cloud.sum()
                 target = (
-                    torch.cat(batch_gene[mask_gene], batch_spatial[mask_spatial], dim=1)
+                    torch.cat(
+                        (batch_gene[mask_gene], batch_spatial[mask_spatial]), dim=1
+                    )
                     if reconstruct_original
                     else embedding
                 )
@@ -344,8 +346,19 @@ def main():
             [PC_spatial[i][: 100 + i] for i in range(20)],
         )
         weights_save_loc = None
+
+    output_dim = (
+        PC_gene[0].shape[1] + PC_spatial[0].shape[1]
+        if args.reconstruct_original
+        else input_dim
+    )
     autoencoder = MLPAutoEncoder(
-        input_dim, args.hidden_dim, args.embedding_dim, args.num_layers, bn=False
+        input_dim,
+        args.hidden_dim,
+        args.embedding_dim,
+        args.num_layers,
+        bn=False,
+        output_dim=output_dim,
     ).to(args.device)
 
     model = NodeEmbeddingModel(model_gene, model_spatial, autoencoder, input_dim).to(

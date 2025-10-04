@@ -574,10 +574,20 @@ class MLP(nn.Module):
 
 
 class MLPAutoEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, embedding_dim, num_layers, bn=False):
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim,
+        embedding_dim,
+        num_layers,
+        bn=False,
+        output_dim=None,
+    ):
         super(MLPAutoEncoder, self).__init__()
+        if output_dim is None:
+            output_dim = input_dim
         self.encoder = MLP(input_dim, hidden_dim, embedding_dim, num_layers, bn)
-        self.decoder = MLP(embedding_dim, hidden_dim, input_dim, num_layers, bn)
+        self.decoder = MLP(embedding_dim, hidden_dim, output_dim, num_layers, bn)
 
     def encode(self, X):
         return F.relu(self.encoder(X))
