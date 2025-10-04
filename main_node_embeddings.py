@@ -94,7 +94,6 @@ class NodeEmbeddingModel(torch.nn.Module):
         gene_model: HiPoNet,
         spatial_model: HiPoNet,
         autoencoder: MLPAutoEncoder,
-        num_embedding_features: int,
     ):
         super().__init__()
         self.gene_model = gene_model
@@ -359,7 +358,7 @@ def main():
         output_dim=output_dim,
     ).to(args.device)
 
-    model = NodeEmbeddingModel(model_gene, model_spatial, autoencoder, input_dim).to(
+    model = NodeEmbeddingModel(model_gene, model_spatial, autoencoder).to(
         args.device
     )
 
