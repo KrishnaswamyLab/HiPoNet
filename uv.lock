@@ -1733,6 +1733,27 @@ wheels = [
 ]
 
 [[package]]
+name = "phate"
+version = "1.0.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "deprecated" },
+    { name = "future" },
+    { name = "graphtools" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "s-gd2" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "scprep" },
+    { name = "tasklogger" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/91/1a/423539b13ab54f5ca81d09e0c16a5a48ad801cfec5b5e7259a3fa03928a8/phate-1.0.11.tar.gz", hash = "sha256:10162e9edd09ce5d0e667b0767e96eed6bda5ee877667202ffff0a578ab5076d", size = 23512, upload-time = "2023-06-26T12:08:37.519Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/7e/85ea7d79b1150b08edcf5aac5bc6b601074f2b5cc43e8f3936b10d6e3b0a/phate-1.0.11-py3-none-any.whl", hash = "sha256:5b20755a0068b99725c36723cf292ff0674fd679fd24217d95f0b12f86e57642", size = 23261, upload-time = "2023-06-26T12:08:36.45Z" },
+]
+
+[[package]]
 name = "pillow"
 version = "11.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1835,6 +1856,7 @@ dependencies = [
     { name = "libauc" },
     { name = "magic-impute" },
     { name = "numpy" },
+    { name = "phate" },
     { name = "scanpy" },
     { name = "scikit-learn" },
     { name = "torch" },
@@ -1856,6 +1878,7 @@ requires-dist = [
     { name = "libauc", specifier = ">=1.4.0" },
     { name = "magic-impute", specifier = ">=3.0.0" },
     { name = "numpy", specifier = ">=2.3.2" },
+    { name = "phate", specifier = ">=1.0.11" },
     { name = "scanpy", specifier = ">=1.11.4" },
     { name = "scikit-learn", specifier = ">=1.7.1" },
     { name = "torch", specifier = ">=2.8.0" },
@@ -2284,6 +2307,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c9/74/b3ff8e6c8446842c3f5c837e9c3dfcfe2018ea6ecef224c710c85ef728f4/requests-2.32.5.tar.gz", hash = "sha256:dbba0bac56e100853db0ea71b82b4dfd5fe2bf6d3754a8893c3af500cec7d7cf", size = 134517, upload-time = "2025-08-18T20:46:02.573Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/db/4254e3eabe8020b458f1a747140d32277ec7a271daf1d235b70dc0b4e6e3/requests-2.32.5-py3-none-any.whl", hash = "sha256:2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6", size = 64738, upload-time = "2025-08-18T20:46:00.542Z" },
+]
+
+[[package]]
+name = "s-gd2"
+version = "1.8.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/47/fb/d85945c9eceaba37552b369c819945d9e9413240643ef49ef3395c357243/s_gd2-1.8.1.tar.gz", hash = "sha256:977597da6d7f6f4b7a479732e374e48d34369e047090720c5d78ca3ca59dc269", size = 53963, upload-time = "2022-11-01T22:09:14.543Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/aa/a60104f113672802d21ec6c25d3c6a72ae7b591c61f89a08e94326fb1175/s_gd2-1.8.1-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:d97fdc51b4bff34d6c7bd77db56783103f1fbfddbef31a7d99caceb9427f0be0", size = 58052, upload-time = "2022-11-01T22:09:51.498Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/bd/0dac9abbb6c8ef868b18bfcc82991c5f1b6d1e0478570d22519318e22693/s_gd2-1.8.1-cp311-cp311-win_amd64.whl", hash = "sha256:e23e6c8e5f12e1b93ac94be1a3793e15039bccd25e905d83243e0ccf543f8be4", size = 50908, upload-time = "2022-11-01T22:13:03.134Z" },
 ]
 
 [[package]]

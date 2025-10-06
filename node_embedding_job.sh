@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=pcnet_nd
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=t.long@yale.edu
 #SBATCH --gpus=h200:1
