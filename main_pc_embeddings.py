@@ -72,7 +72,7 @@ def prepare_dataset(hiponet: HiPoNet, PCs, raw_dir: str):
     save_loc = (
         PRECOMPUTED_EMBEDDINGS_LOC / f"{raw_dir.rstrip('/').split('/')[-1]}_emb.pt"
     )
-    if save_loc.exists() and not args.recompute_embeddings:
+    if save_loc.exists() and not args.regenerate_embeddings:
         embeddings = torch.load(save_loc, map_location="cpu")
     else:
         full_loader = DataLoader(
