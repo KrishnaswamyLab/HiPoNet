@@ -121,8 +121,8 @@ def test(model, loader):
             hn_embedding = hn_embedding.to(args.device)
             reconstructed = model(hn_embedding)
             test_loss += torch.nn.functional.mse_loss(
-                reconstructed, hn_embedding, reduction="sum"
-            )
+                reconstructed, hn_embedding, reduction="mean"
+            ) * hn_embedding.shape[0]
             count += hn_embedding.shape[0]
     return test_loss / count
 
@@ -141,6 +141,7 @@ def train(hiponet, mlp_autoencoder: nn.Module, PCs, weights_save_loc, raw_dir):
     with tqdm(range(args.num_epochs)) as tq:
         for epoch in tq:
             train_loss = 0
+            count = 0
             mlp_autoencoder.train()
             opt.zero_grad()
             minibatches_per_batch = args.n_accumulate
@@ -149,7 +150,8 @@ def train(hiponet, mlp_autoencoder: nn.Module, PCs, weights_save_loc, raw_dir):
                 reconstructed = mlp_autoencoder(hn_embedding)
                 loss = loss_fn(reconstructed, hn_embedding)
                 loss /= minibatches_per_batch
-                train_loss += loss.detach().item()
+                train_loss += loss.detach().item() * hn_embedding.shape[0]
+                count += hn_embedding.shape[0]
                 loss.backward()
 
                 if (i % args.n_accumulate == 0) or i == total_n_batches:
@@ -160,6 +162,8 @@ def train(hiponet, mlp_autoencoder: nn.Module, PCs, weights_save_loc, raw_dir):
             for name, param in mlp_autoencoder.named_parameters():
                 if param.grad is not None:
                     wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
+
+            train_loss /= count
 
             test_loss = test(mlp_autoencoder, test_loader)
             if test_loss < best_loss:
