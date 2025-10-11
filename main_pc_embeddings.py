@@ -3,15 +3,19 @@ import torch.nn as nn
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 import wandb
+import pathlib
 from utils.read_data import load_data
-from utils.training import collate_fn
+from utils.training import collate_fn, save_model
 
 from models.graph_learning import HiPoNet, MLPAutoEncoder
 from argparse import ArgumentParser
 
-import gc
-
-gc.enable()
+PRECOMPUTED_EMBEDDINGS_LOC = (
+    pathlib.Path(__file__).parent / "data" / "precomputed_embeddings"
+)
+WEIGHTS_SAVE_LOC = pathlib.Path(__file__).parent / "model_weights"
+if not WEIGHTS_SAVE_LOC.exists():
+    WEIGHTS_SAVE_LOC.mkdir()
 
 # Define the parameters using parser args
 parser = ArgumentParser(description="Pointcloud net")
@@ -53,6 +57,7 @@ parser.add_argument(
 parser.add_argument(
     "--embedding_dim", type=int, default=128, help="Autoencoder embedding dimension"
 )
+parser.add_argument("--regenerate_embeddings", action="store_true")
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -62,22 +67,34 @@ else:
     args.device = "cpu"
 
 
-def prepare_dataset(hiponet: HiPoNet, PCs):
+def prepare_dataset(hiponet: HiPoNet, PCs, raw_dir: str):
     """Precompute hiponet embeddings."""
-    full_loader = DataLoader(
-        list(zip(PCs, range(len(PCs)))),
-        batch_size=1,
-        shuffle=False,
-        collate_fn=collate_fn,
+    save_loc = (
+        PRECOMPUTED_EMBEDDINGS_LOC / f"{raw_dir.rstrip('/').split('/')[-1]}_emb.pt"
     )
-    hiponet.eval()
-    all_embeddings = []
-    with torch.no_grad():
-        for batch, mask, _ in full_loader:
-            batch, mask = batch.to(args.device), mask.to(args.device)
-            hn_embeddings = hiponet(batch, mask).to("cpu")
-            all_embeddings.append(hn_embeddings)
-    embeddings_dataset = torch.utils.data.TensorDataset(torch.concat(all_embeddings, 0))
+    if save_loc.exists() and not args.recompute_embeddings:
+        embeddings = torch.load(save_loc, map_location="cpu")
+    else:
+        full_loader = DataLoader(
+            list(zip(PCs, range(len(PCs)))),
+            batch_size=1,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
+        hiponet.eval()
+        all_embeddings = []
+        with torch.no_grad():
+            for batch, mask, _ in full_loader:
+                batch, mask = batch.to(args.device), mask.to(args.device)
+                hn_embeddings = hiponet(batch, mask).to("cpu")
+                all_embeddings.append(hn_embeddings)
+        embeddings = torch.concat(all_embeddings, 0)
+        # Normalize across dimensions so that we don't concentrate only on one
+        embeddings -= embeddings.mean(dim=0, keepdim=True)
+        embeddings /= embeddings.std(dim=0, keepdim=True)
+        torch.save(embeddings, save_loc)
+
+    embeddings_dataset = torch.utils.data.TensorDataset(embeddings)
     train_data, test_data = torch.utils.data.random_split(
         embeddings_dataset, lengths=[0.8, 0.2]
     )
@@ -100,7 +117,7 @@ def test(model, loader):
     test_loss = 0
     count = 0
     with torch.no_grad():
-        for (hn_embedding, ) in loader:
+        for (hn_embedding,) in loader:
             hn_embedding = hn_embedding.to(args.device)
             reconstructed = model(hn_embedding)
             test_loss += torch.nn.functional.mse_loss(
@@ -110,8 +127,8 @@ def test(model, loader):
     return test_loss / count
 
 
-def train(hiponet, mlp_autoencoder: nn.Module, PCs):
-    train_loader, test_loader = prepare_dataset(hiponet, PCs)
+def train(hiponet, mlp_autoencoder: nn.Module, PCs, weights_save_loc, raw_dir):
+    train_loader, test_loader = prepare_dataset(hiponet, PCs, raw_dir)
     opt = torch.optim.AdamW(
         list(mlp_autoencoder.parameters()),
         lr=args.lr,
@@ -127,7 +144,7 @@ def train(hiponet, mlp_autoencoder: nn.Module, PCs):
             mlp_autoencoder.train()
             opt.zero_grad()
             minibatches_per_batch = args.n_accumulate
-            for i, (hn_embedding, ) in enumerate(train_loader, start=1):
+            for i, (hn_embedding,) in enumerate(train_loader, start=1):
                 hn_embedding = hn_embedding.to(args.device)
                 reconstructed = mlp_autoencoder(hn_embedding)
                 loss = loss_fn(reconstructed, hn_embedding)
@@ -147,6 +164,7 @@ def train(hiponet, mlp_autoencoder: nn.Module, PCs):
             test_loss = test(mlp_autoencoder, test_loader)
             if test_loss < best_loss:
                 best_loss = test_loss
+                save_model(mlp_autoencoder, "autoencoder", weights_save_loc)
             wandb.log(
                 {
                     "train loss": train_loss,
@@ -195,7 +213,9 @@ def main():
     mlp_autoencoder = MLPAutoEncoder(
         input_dim, args.hidden_dim, args.embedding_dim, args.num_layers
     ).to(args.device)
-    train(hiponet, mlp_autoencoder, PCs)
+    weights_save_loc = WEIGHTS_SAVE_LOC / config["slurm_job_id"]
+    weights_save_loc.mkdir(exist_ok=True)
+    train(hiponet, mlp_autoencoder, PCs, weights_save_loc, args.raw_dir)
 
 
 if __name__ == "__main__":
