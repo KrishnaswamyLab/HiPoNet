@@ -67,32 +67,38 @@ else:
     args.device = "cpu"
 
 
-def prepare_dataset(hiponet: HiPoNet, PCs, raw_dir: str):
+def prepare_dataset(hiponet: HiPoNet, PCs, labels, raw_dir: str):
     """Precompute hiponet embeddings."""
-    save_loc = (
+    emb_save_loc = (
         PRECOMPUTED_EMBEDDINGS_LOC / f"{raw_dir.rstrip('/').split('/')[-1]}_emb.pt"
     )
-    if save_loc.exists() and not args.regenerate_embeddings:
-        embeddings = torch.load(save_loc, map_location="cpu")
+    label_save_loc = (
+        PRECOMPUTED_EMBEDDINGS_LOC / f"{raw_dir.rstrip('/').split('/')[-1]}_label.pt"
+    )
+    if emb_save_loc.exists() and not args.regenerate_embeddings:
+        embeddings = torch.load(emb_save_loc, map_location="cpu")
     else:
         full_loader = DataLoader(
-            list(zip(PCs, range(len(PCs)))),
+            list(zip(PCs, labels)),
             batch_size=1,
             shuffle=False,
             collate_fn=collate_fn,
         )
         hiponet.eval()
         all_embeddings = []
+        all_labels = []
         with torch.no_grad():
-            for batch, mask, _ in full_loader:
+            for batch, mask, labels in full_loader:
                 batch, mask = batch.to(args.device), mask.to(args.device)
                 hn_embeddings = hiponet(batch, mask).to("cpu")
                 all_embeddings.append(hn_embeddings)
+                all_labels.append(labels)
         embeddings = torch.concat(all_embeddings, 0)
         # Normalize across dimensions so that we don't concentrate only on one
         embeddings -= embeddings.mean(dim=0, keepdim=True)
         embeddings /= embeddings.std(dim=0, keepdim=True)
-        torch.save(embeddings, save_loc)
+        torch.save(embeddings, emb_save_loc)
+        torch.save(torch.concat(all_labels, dim=0), label_save_loc)
 
     embeddings_dataset = torch.utils.data.TensorDataset(embeddings)
     train_data, test_data = torch.utils.data.random_split(
@@ -120,15 +126,18 @@ def test(model, loader):
         for (hn_embedding,) in loader:
             hn_embedding = hn_embedding.to(args.device)
             reconstructed = model(hn_embedding)
-            test_loss += torch.nn.functional.mse_loss(
-                reconstructed, hn_embedding, reduction="mean"
-            ) * hn_embedding.shape[0]
+            test_loss += (
+                torch.nn.functional.mse_loss(
+                    reconstructed, hn_embedding, reduction="mean"
+                )
+                * hn_embedding.shape[0]
+            )
             count += hn_embedding.shape[0]
     return test_loss / count
 
 
-def train(hiponet, mlp_autoencoder: nn.Module, PCs, weights_save_loc, raw_dir):
-    train_loader, test_loader = prepare_dataset(hiponet, PCs, raw_dir)
+def train(hiponet, mlp_autoencoder: nn.Module, PCs, labels, weights_save_loc, raw_dir):
+    train_loader, test_loader = prepare_dataset(hiponet, PCs, labels, raw_dir)
     opt = torch.optim.AdamW(
         list(mlp_autoencoder.parameters()),
         lr=args.lr,
@@ -219,7 +228,7 @@ def main():
     ).to(args.device)
     weights_save_loc = WEIGHTS_SAVE_LOC / config["slurm_job_id"]
     weights_save_loc.mkdir(exist_ok=True)
-    train(hiponet, mlp_autoencoder, PCs, weights_save_loc, args.raw_dir)
+    train(hiponet, mlp_autoencoder, PCs, labels, weights_save_loc, args.raw_dir)
 
 
 if __name__ == "__main__":
