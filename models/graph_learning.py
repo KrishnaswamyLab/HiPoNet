@@ -590,7 +590,7 @@ class MLPAutoEncoder(nn.Module):
         self.decoder = MLP(embedding_dim, hidden_dim, output_dim, num_layers, bn)
 
     def encode(self, X):
-        return F.relu(self.encoder(X))
+        return F.tanh(self.encoder(X))
 
     def decode(self, X):
         return self.decoder(X)
