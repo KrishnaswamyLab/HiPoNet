@@ -169,6 +169,7 @@ class TransformerBlock(nn.Module):
             d_model,
             d_model,
             d_model,
+            d_model * nhead,
             nhead,
             dropout=dropout,
             bias=bias,
@@ -247,9 +248,14 @@ class Transformer(nn.Module):
         self.num_layers = num_layers
         self.linear = nn.Linear(d_model, out_dim)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor, sizes: torch.Tensor):
         for layer in self.layers:
             x = layer(x)
+        
+        # Output has shape (batch size, n points (varies by point cloud), d)
+        # Apply mean pooling across the *node* dimension to get something of shape (batch size, d)
+        x = x.to_padded_tensor(0.).sum(dim=1)
+        x /= sizes
 
-        x = layer.mean(dim=-1)
+        # Final linear layer to get logits
         return self.linear(x)
