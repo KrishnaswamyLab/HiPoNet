@@ -156,9 +156,10 @@ class TransformerBlock(nn.Module):
         nhead: int,
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        activation: Callable[[Tensor], Tensor] = F.relu,
+        activation: Callable[[Tensor], Tensor] = F.gelu,
         layer_norm_eps: float = 1e-5,
         norm_first: bool = False,
+        disable_norm=False,
         bias: bool = True,
         device=None,
         dtype=None,
@@ -189,11 +190,15 @@ class TransformerBlock(nn.Module):
         )
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
+        self.disable_norm = disable_norm
 
     def forward(self, x):
         if self.norm_first:
             x = x + self._sa_block(self.norm1(x))
             x = x + self._ff_block(self.norm2(x))
+        elif self.disable_norm:
+            x = x + self._sa_block(x)
+            x = x + self._ff_block(x)
         else:
             x = self.norm1(x + self._sa_block(x))
             x = self.norm2(x + self._ff_block(x))
@@ -218,6 +223,7 @@ class TransformerBlock(nn.Module):
 class Transformer(nn.Module):
     def __init__(
         self,
+        d_input: int,
         d_model: int,
         out_dim: int,
         nhead: int,
@@ -232,6 +238,7 @@ class Transformer(nn.Module):
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
+        self.embedding_layer = nn.Linear(d_input, d_model, **factory_kwargs)
         self.layers = torch.nn.ModuleList(
             TransformerBlock(
                 d_model=d_model,
@@ -246,9 +253,10 @@ class Transformer(nn.Module):
             for _ in range(num_layers)
         )
         self.num_layers = num_layers
-        self.linear = nn.Linear(d_model, out_dim)
+        self.linear = nn.Linear(d_model, out_dim, **factory_kwargs)
 
     def forward(self, x: torch.Tensor, sizes: torch.Tensor):
+        x = self.embedding_layer(x)
         for layer in self.layers:
             x = layer(x)
         
