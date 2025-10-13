@@ -130,11 +130,12 @@ def train(model: nn.Module, PCs, labels):
                             wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
                     opt.zero_grad()
                     minibatches_per_batch = min(args.n_accumulate, total_n_batches - i)
-                    scheduler.step()
 
                 del (logits, loss, preds)
                 torch.cuda.empty_cache()
                 gc.collect()
+        
+            scheduler.step()
 
             train_acc = correct_train * 100 / len(train_idx)
             test_acc = test(model, test_loader)
