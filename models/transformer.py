@@ -50,6 +50,7 @@ class MultiHeadAttention(nn.Module):
         self.E_head = E_total // nheads
         self.bias = bias
 
+    @torch.compile
     def forward(
         self,
         query: torch.Tensor,
@@ -161,6 +162,7 @@ class TransformerBlock(nn.Module):
         norm_first: bool = False,
         disable_norm=False,
         bias: bool = True,
+        use_swiglu: bool = False,
         device=None,
         dtype=None,
     ):
@@ -192,6 +194,12 @@ class TransformerBlock(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         self.disable_norm = disable_norm
 
+        self.use_swiglu = use_swiglu
+        if self.use_swiglu:
+            self.swiglu = SwiGLUFFN(
+                d_model, hidden_dim=dim_feedforward, multiple_of=256, **factory_kwargs
+            )
+
     def forward(self, x):
         if self.norm_first:
             x = x + self._sa_block(self.norm1(x))
@@ -216,7 +224,10 @@ class TransformerBlock(nn.Module):
         return self.dropout1(x)
 
     def _ff_block(self, x: Tensor) -> Tensor:
-        x = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        if self.use_swiglu:
+            x = self.swiglu(x)
+        else:
+            x = self.linear2(self.dropout(self.activation(self.linear1(x))))
         return self.dropout2(x)
 
 
@@ -233,6 +244,7 @@ class Transformer(nn.Module):
         activation: Callable[[Tensor], Tensor] = F.relu,
         layer_norm_eps: float = 1e-5,
         norm_first: bool = False,
+        use_swiglu: bool = False,
         device=None,
         dtype=None,
     ) -> None:
@@ -248,6 +260,7 @@ class Transformer(nn.Module):
                 activation=activation,
                 layer_norm_eps=layer_norm_eps,
                 norm_first=norm_first,
+                use_swiglu=use_swiglu,
                 **factory_kwargs,
             )
             for _ in range(num_layers)
@@ -259,10 +272,10 @@ class Transformer(nn.Module):
         x = self.embedding_layer(x)
         for layer in self.layers:
             x = layer(x)
-        
+
         # Output has shape (batch size, n points (varies by point cloud), d)
         # Apply mean pooling across the *node* dimension to get something of shape (batch size, d)
-        x = x.to_padded_tensor(0.).sum(dim=1)
+        x = x.to_padded_tensor(0.0).sum(dim=1)
         x /= sizes
 
         # Final linear layer to get logits
