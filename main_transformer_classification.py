@@ -31,8 +31,9 @@ parser.add_argument(
     "--num_layers", type=int, default=3, help="Number of Transformer blocks"
 )
 parser.add_argument(
-    "--nhead", type=int, default=4, help="Number of attention heads"
+    "--embedding-dim", type=int, default=128, help="Embedding dimension for attention. The input is linearly transformed to this."
 )
+parser.add_argument("--nhead", type=int, default=4, help="Number of attention heads")
 parser.add_argument("--lr", type=float, default=0.01, help="Learning Rate")
 parser.add_argument("--wd", type=float, default=3e-3, help="Weight decay")
 parser.add_argument("--dropout", type=float, default=0.1, help="dropout")
@@ -54,6 +55,7 @@ if args.gpu != -1 and torch.cuda.is_available():
 else:
     args.device = "cpu"
 
+
 def collate_fn(batch):
     """Create nested tensors."""
     input_tensor = torch.nested.as_nested_tensor(
@@ -63,6 +65,7 @@ def collate_fn(batch):
     labels = torch.LongTensor([x[1] for x in batch])
 
     return input_tensor, sizes, labels
+
 
 def test(model, loader):
     model.eval()
@@ -85,6 +88,7 @@ def train(model: nn.Module, PCs, labels):
         lr=args.lr,
         weight_decay=args.wd,
     )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.num_epochs)
     train_idx, test_idx = train_test_split(np.arange(len(labels)), test_size=0.2)
     train_loader = DataLoader(
         [(PCs[i], labels[i]) for i in train_idx],
@@ -120,16 +124,16 @@ def train(model: nn.Module, PCs, labels):
 
                 if (i % args.n_accumulate == 0) or i == total_n_batches:
                     opt.step()
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
                     opt.zero_grad()
                     minibatches_per_batch = min(args.n_accumulate, total_n_batches - i)
+                    scheduler.step()
 
                 del (logits, loss, preds)
                 torch.cuda.empty_cache()
                 gc.collect()
-
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
 
             train_acc = correct_train * 100 / len(train_idx)
             test_acc = test(model, test_loader)
@@ -161,7 +165,7 @@ def main():
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
     wandb.init(
-        project="pointcloud-net-k-fold",
+        project="pointcloud-net-transformer",
         config=config,
         mode="disabled" if args.disable_wb else None,
     )
@@ -171,11 +175,13 @@ def main():
     model = nn.DataParallel(
         Transformer(
             PCs[0].shape[1],
+            128,
             num_labels,
             nhead=args.nhead,
             num_layers=args.num_layers,
             dim_feedforward=args.hidden_dim,
             dropout=args.dropout,
+            activation=torch.nn.functional.gelu,
         )
     )
     train(model, PCs, labels)
