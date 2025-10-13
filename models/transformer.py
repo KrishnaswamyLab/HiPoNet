@@ -50,7 +50,6 @@ class MultiHeadAttention(nn.Module):
         self.E_head = E_total // nheads
         self.bias = bias
 
-    @torch.compile
     def forward(
         self,
         query: torch.Tensor,
