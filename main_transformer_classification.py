@@ -34,6 +34,7 @@ parser.add_argument(
     "--embedding-dim", type=int, default=128, help="Embedding dimension for attention. The input is linearly transformed to this."
 )
 parser.add_argument("--nhead", type=int, default=4, help="Number of attention heads")
+parser.add_argument("--swiglu", action="store_true")
 parser.add_argument("--lr", type=float, default=0.01, help="Learning Rate")
 parser.add_argument("--wd", type=float, default=3e-3, help="Weight decay")
 parser.add_argument("--dropout", type=float, default=0.1, help="dropout")
@@ -182,6 +183,7 @@ def main():
             dim_feedforward=args.hidden_dim,
             dropout=args.dropout,
             activation=torch.nn.functional.gelu,
+            use_swiglu=args.swiglu,
         )
     )
     train(model, PCs, labels)
