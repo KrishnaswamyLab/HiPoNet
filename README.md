@@ -1,5 +1,5 @@
 
-# PointCloudNet
+# HiPoNet
 
 This repository is for PointCloudNet, a method designed to learn from high-dimensional point cloud data using multiple graph embeddings and graph wavelet transforms.
 
