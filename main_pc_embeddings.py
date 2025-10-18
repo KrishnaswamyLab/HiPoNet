@@ -202,13 +202,19 @@ def main():
 
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
+
+    PCs, labels, num_labels = load_data(args.raw_dir, args.full)
+    if os.environ["SMOKE_TEST"]:
+        PCs = [pc[:100] for pc in PCs[:100]]
+        labels = labels[:100]
+        args.disable_wb = True
+
     wandb.init(
         project="pointcloud-net-k-fold",
         config=config,
         mode="disabled" if args.disable_wb else None,
     )
 
-    PCs, labels, num_labels = load_data(args.raw_dir, args.full)
     hiponet = HiPoNet(
         PCs[0].shape[1],
         1,

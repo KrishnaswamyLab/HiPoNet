@@ -81,8 +81,8 @@ def load_data(raw_dir, full):
             labels.append(torch.load(file))
         return X, X_spatial, labels
     elif data_name == "synthetic_gmm":
-        PCs = torch.load(raw_dir + "point_clouds.pt")
-        labels = torch.load(raw_dir + "labels.pt")
+        PCs = torch.load(raw_dir + "/point_clouds.pt")
+        labels = torch.load(raw_dir + "/labels.pt")[:, 0].tolist()
         num_labels = 0
     else:
         raise ValueError(f"Dataset {data_name} not recognized.")
