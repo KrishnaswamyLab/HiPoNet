@@ -1,11 +1,11 @@
 
 # HiPoNet
 
-This repository is for PointCloudNet, a method designed to learn from high-dimensional point cloud data using multiple graph embeddings and graph wavelet transforms.
-
+This repository is for HiPoNet, a method designed to learn from high-dimensional point cloud data using multiple graph embeddings and graph wavelet transforms.
+![HiPoNet Pipeline](archive/graphical_abstract.png)
 ## Overview
 
-The provided Python script trains PointCloudNet on a given dataset of point features and associated labels. It uses:
+The provided Python script trains HiPoNet on a given dataset of point features and associated labels. It uses:
 
 - **PyTorch** for model definition and training.
 - **wandb** (Weights & Biases) for experiment tracking.
