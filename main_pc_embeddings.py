@@ -58,6 +58,8 @@ parser.add_argument(
     "--embedding_dim", type=int, default=128, help="Autoencoder embedding dimension"
 )
 parser.add_argument("--regenerate_embeddings", action="store_true")
+parser.add_argument("--learn_alphas", action="store_true")
+parser.add_argument("--alpha_loss_weight", type=float, default=0.1)
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -75,8 +77,16 @@ def prepare_dataset(hiponet: HiPoNet, PCs, labels, raw_dir: str):
     label_save_loc = (
         PRECOMPUTED_EMBEDDINGS_LOC / f"{raw_dir.rstrip('/').split('/')[-1]}_label.pt"
     )
+    batch_save_loc = (
+        PRECOMPUTED_EMBEDDINGS_LOC / f"{raw_dir.rstrip('/').split('/')[-1]}_batch.pt"
+    )
+    mask_save_loc = (
+        PRECOMPUTED_EMBEDDINGS_LOC / f"{raw_dir.rstrip('/').split('/')[-1]}_mask.pt"
+    )
     if emb_save_loc.exists() and not args.regenerate_embeddings:
         embeddings = torch.load(emb_save_loc, map_location="cpu")
+        batches = torch.load(batch_save_loc, map_location="cpu")
+        masks = torch.load(mask_save_loc, map_location="cpu")
     else:
         full_loader = DataLoader(
             list(zip(PCs, labels)),
@@ -85,22 +95,40 @@ def prepare_dataset(hiponet: HiPoNet, PCs, labels, raw_dir: str):
             collate_fn=collate_fn,
         )
         hiponet.eval()
+        # The pre-generated embeddings are *without alphas*
+        ignore_alphas = hiponet.layer.ignore_alphas
+        hiponet.layer.ignore_alphas = True
         all_embeddings = []
         all_labels = []
+        all_batches = []
+        all_masks = []
         with torch.no_grad():
             for batch, mask, labels in full_loader:
+                all_batches.append(batch)
+                all_masks.append(mask)
                 batch, mask = batch.to(args.device), mask.to(args.device)
                 hn_embeddings = hiponet(batch, mask).to("cpu")
                 all_embeddings.append(hn_embeddings)
                 all_labels.append(labels)
+
         embeddings = torch.concat(all_embeddings, 0)
         # Normalize across dimensions so that we don't concentrate only on one
         embeddings -= embeddings.mean(dim=0, keepdim=True)
         embeddings /= embeddings.std(dim=0, keepdim=True)
         torch.save(embeddings, emb_save_loc)
-        torch.save(torch.concat(all_labels, dim=0), label_save_loc)
 
-    embeddings_dataset = torch.utils.data.TensorDataset(embeddings)
+        batches, masks = (
+            torch.concat(all_batches, dim=0),
+            torch.concat(all_masks, dim=0),
+        )
+        torch.save(torch.concat(all_labels, dim=0), label_save_loc)
+        torch.save(batches, batch_save_loc)
+        torch.save(masks, mask_save_loc)
+
+        # Reset to previous
+        hiponet.layer.ignore_alphas = ignore_alphas
+
+    embeddings_dataset = torch.utils.data.TensorDataset(embeddings, batches, masks)
     train_data, test_data = torch.utils.data.random_split(
         embeddings_dataset, lengths=[0.8, 0.2]
     )
@@ -123,7 +151,7 @@ def test(model, loader):
     test_loss = 0
     count = 0
     with torch.no_grad():
-        for (hn_embedding,) in loader:
+        for hn_embedding, batch, mask in loader:
             hn_embedding = hn_embedding.to(args.device)
             reconstructed = model(hn_embedding)
             test_loss += (
@@ -136,7 +164,9 @@ def test(model, loader):
     return test_loss / count
 
 
-def train(hiponet, mlp_autoencoder: nn.Module, PCs, labels, weights_save_loc, raw_dir):
+def train(
+    hiponet: HiPoNet, mlp_autoencoder: nn.Module, PCs, labels, weights_save_loc, raw_dir
+):
     train_loader, test_loader = prepare_dataset(hiponet, PCs, labels, raw_dir)
     opt = torch.optim.AdamW(
         list(mlp_autoencoder.parameters()),
@@ -154,10 +184,27 @@ def train(hiponet, mlp_autoencoder: nn.Module, PCs, labels, weights_save_loc, ra
             mlp_autoencoder.train()
             opt.zero_grad()
             minibatches_per_batch = args.n_accumulate
-            for i, (hn_embedding,) in enumerate(train_loader, start=1):
+            for i, (hn_embedding, batch, mask) in enumerate(train_loader, start=1):
                 hn_embedding = hn_embedding.to(args.device)
-                reconstructed = mlp_autoencoder(hn_embedding)
+
+                if args.learn_alphas:
+                    batch = batch.to(args.device)
+                    mask = mask.to(args.device)
+                    input_embedding = hiponet(batch, mask)
+                else:
+                    input_embedding = hn_embedding
+
+                reconstructed = mlp_autoencoder(input_embedding)
                 loss = loss_fn(reconstructed, hn_embedding)
+
+                alpha_loss = torch.nan
+                if args.learn_alphas:
+                    alpha_loss = -1 * (
+                        args.alpha_loss_weight
+                        * torch.softmax(hiponet.layer.alphas, dim=1).pow(2).sum()
+                    )
+                    loss += alpha_loss
+
                 loss /= minibatches_per_batch
                 train_loss += loss.detach().item() * hn_embedding.shape[0]
                 count += hn_embedding.shape[0]
@@ -183,14 +230,19 @@ def train(hiponet, mlp_autoencoder: nn.Module, PCs, labels, weights_save_loc, ra
                     "train loss": train_loss,
                     "test loss": test_loss,
                     "best loss": best_loss,
+                    "alpha_loss": alpha_loss,
                 },
                 step=epoch + 1,
             )
 
-            tq.set_description(
-                "Train Loss = %.4f, Test Loss = %.4f, Best Loss = %.4f"
-                % (train_loss, test_loss, best_loss)
+            desc = "Train Loss = %.4f, Test Loss = %.4f, Best Loss = %.4f" % (
+                train_loss,
+                test_loss,
+                best_loss,
             )
+            if args.learn_alphas:
+                desc += f", Alpha loss = {alpha_loss:.4f}"
+            tq.set_description(desc)
     print(f"Best loss : {best_loss}")
 
 
@@ -204,7 +256,7 @@ def main():
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
 
     PCs, labels, num_labels = load_data(args.raw_dir, args.full)
-    if os.environ["SMOKE_TEST"]:
+    if os.environ.get("SMOKE_TEST"):
         PCs = [pc[:100] for pc in PCs[:100]]
         labels = labels[:100]
         args.disable_wb = True
@@ -223,7 +275,8 @@ def main():
         args.J,
         args.device,
         args.sigma,
-        ignore_alphas=True,
+        ignore_alphas=(not args.learn_alphas),
+        softmax_alphas=args.learn_alphas,
     )
     with torch.no_grad():
         batch = PCs[0].to(args.device)[None, ...]

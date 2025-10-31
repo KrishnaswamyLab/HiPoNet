@@ -78,6 +78,7 @@ class GraphFeatLearningLayer(nn.Module):
         normalize_alphas: bool,
         ignore_alphas: bool,
         use_alphas_for_connectivity_only: bool,
+        softmax_alphas: bool,
     ):
         super().__init__()
 
@@ -90,6 +91,12 @@ class GraphFeatLearningLayer(nn.Module):
         self.normalize_alphas = normalize_alphas
         self.ignore_alphas = ignore_alphas
         self.use_alphas_for_connectivity_only = use_alphas_for_connectivity_only
+        self.softmax_alphas = softmax_alphas
+
+        if self.normalize_alphas and self.softmax_alphas:
+            raise ValueError(
+                "Only one of normalize_alphas and softmax_alphas can be True"
+            )
 
         if self.ignore_alphas:
             self.alphas = nn.Parameter(
@@ -112,6 +119,8 @@ class GraphFeatLearningLayer(nn.Module):
             # In order to avoid having alpha -> 0, we normalize the entries to keep the norm fixed at sqrt(dimension)
             norm_value = self.dimension**0.5
             alphas = norm_value * self.alphas / self.alphas.norm(dim=1, keepdim=True)
+        elif self.softmax_alphas:
+            alphas = torch.nn.functional.softmax(self.alphas, dim=1)
         else:
             alphas = self.alphas
         W, X_bar = compute_diffusion_matrix(
@@ -522,6 +531,7 @@ class HiPoNet(nn.Module):
         normalize_alphas=False,
         ignore_alphas=False,
         use_alphas_for_connectivity_only=False,
+        softmax_alphas=False,
     ):
         super(HiPoNet, self).__init__()
         self.dimension = dimension
@@ -537,6 +547,7 @@ class HiPoNet(nn.Module):
                 normalize_alphas=normalize_alphas,
                 ignore_alphas=ignore_alphas,
                 use_alphas_for_connectivity_only=use_alphas_for_connectivity_only,
+                softmax_alphas=softmax_alphas,
             )
         elif K == 2:
             self.layer = SimplicialFeatLearningLayerTri(
