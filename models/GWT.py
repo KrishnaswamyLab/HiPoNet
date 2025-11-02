@@ -29,11 +29,11 @@ class GraphWaveletTransform(nn.Module):
         - Zeroth-order: P^J X
         - First-order: |psi_j X| for j in 1,...,J where psi_j = P^{2^j} - P^{2^{j-1}}
         - Second-order: |psi_j |psi_i X| | for i < j
-        
+
         P: Transition matrix (num_points x num_points)
         X: Node features (num_points x num_features)
         mask: Mask for valid nodes (num_points,)
-        
+
         """
         num_points = P.shape[0]
         P_powered = P
@@ -72,11 +72,20 @@ class GraphWaveletTransform(nn.Module):
             features = (features.sum(dim=1) / mask.sum()).flatten()
         else:
             features = features.permute(1, 0, 2).reshape(num_points, -1)
-    
+
         return features
 
     # Batch over the graphs, and batch over the alphas
-    forward = torch.vmap(
-        torch.vmap(generate_timepoint_features, in_dims=(None, 0, 0, 0)),
+    single_batch_forward = torch.vmap(
+        generate_timepoint_features, in_dims=(None, 0, 0, 0)
+    )
+    double_batch_forward = torch.vmap(
+        single_batch_forward,
         in_dims=(None, 0, 0, 0),
     )
+
+    def forward(self, P, X, mask):
+        if len(P.shape) == 3:
+            return self.single_batch_forward(P, X, mask)
+        else:
+            return self.double_batch_forward(P, X, mask)

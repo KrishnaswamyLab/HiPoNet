@@ -17,18 +17,37 @@ def compute_dist(X):
     )
     return D
 
+@torch.vmap
+def get_D_matrix(G):
+    return (
+        torch.reshape(torch.diag(G), (1, -1))
+        + torch.reshape(torch.diag(G), (-1, 1))
+        - 2 * G
+    )
+
+
+# Need to implement manually to use nested tensors
+def single_batched_compute_dist(X):
+    G = torch.matmul(X, X.permute(0, 2, 1))
+    D = get_D_matrix(G)
+    return D
+
 
 # compute dist, but batched over the graph dim and the alphas dim
-batched_compute_dist = torch.vmap(torch.vmap(compute_dist))
+double_batched_compute_dist = torch.vmap(torch.vmap(single_batched_compute_dist))
 
 
 def compute_diffusion_from_dist(W, sigma, threshold, mask):
     W = torch.exp(-W / sigma)
     W = torch.where(W < threshold, 0.0, W)
-    # Mask has shape (B, N)
-    # We first want to broadcast to (B, 1, N)
+    if len(W.shape) == 4:
+        # Mask has shape (B, N)
+        # We first want to broadcast to (B, 1, N)
+        W_mask = mask[:, None, :, None] & mask[:, None, None, :]
+    else:
+        W_mask = mask[:, :, None] & mask[:, None, :]
     # We then want to set any row or column that is masked out to zero
-    W = torch.where(mask[:, None, :, None] & mask[:, None, None, :], W, 0.0)
+    W = torch.where(W_mask, W, 0.0)
     # We clamp the min to avoid division by zero
     d = W.sum(2, keepdim=True).clamp_min(1e-8)
     W.div_(d)
@@ -39,7 +58,7 @@ def compute_diffusion_from_dist(W, sigma, threshold, mask):
 
 def compute_diffusion_matrix(
     point_clouds: torch.Tensor,
-    alphas: torch.Tensor,
+    alphas: torch.Tensor | None,
     sigma,
     threshold,
     mask: torch.Tensor,
@@ -56,10 +75,16 @@ def compute_diffusion_matrix(
     X_bar: (B, n_weights, N, d) reweighted point clouds
     """
     # X_bar shape: (B, n_weights, N, d)
-    X_bar = point_clouds.unsqueeze(1) * alphas[None, :, None, :]
-    W = batched_compute_dist(X_bar)
+    X_bar = point_clouds
+    if alphas is not None:
+        X_bar = X_bar.unsqueeze(1)
+        X_bar *= alphas[None, :, None, :]
+        W = double_batched_compute_dist(X_bar)
+    else:
+        # Don't need to batch over alphas dim
+        W = single_batched_compute_dist(X_bar)
     W = compute_diffusion_from_dist(W, sigma, threshold, mask)
-    if use_alphas_for_connectivity_only:
+    if use_alphas_for_connectivity_only and alphas is not None:
         # Instead of X_bar, just add the n_weights dimension and use the point clouds
         return W, point_clouds.unsqueeze(1).expand(-1, alphas.shape[0], -1, -1)
     return W, X_bar
@@ -81,6 +106,9 @@ class GraphFeatLearningLayer(nn.Module):
         softmax_alphas: bool,
     ):
         super().__init__()
+
+        if ignore_alphas:
+            n_weights = 1
 
         self.n_weights = n_weights
         self.dimension = dimension
@@ -114,7 +142,9 @@ class GraphFeatLearningLayer(nn.Module):
         )
 
     def forward(self, point_clouds, mask):
-        if self.normalize_alphas:
+        if self.ignore_alphas:
+            alphas = None
+        elif self.normalize_alphas:
             # When alpha entries normally distributed, they have norm ~ sqrt(dimension)
             # In order to avoid having alpha -> 0, we normalize the entries to keep the norm fixed at sqrt(dimension)
             norm_value = self.dimension**0.5
@@ -131,10 +161,11 @@ class GraphFeatLearningLayer(nn.Module):
             mask,
             self.use_alphas_for_connectivity_only,
         )
-        # Mask has shape (B, N), expand to (B, n_weights, N) to match W and X_bar
-        features = self.gwt(
-            W, X_bar, mask.unsqueeze(1).expand((-1, self.n_weights, -1))
-        )
+        if alphas is not None:
+            # Mask has shape (B, N), expand to (B, n_weights, N) to match W and X_bar
+            mask = mask.unsqueeze(1).expand((-1, self.n_weights, -1))
+
+        features = self.gwt(W, X_bar, mask)
         if self.gwt.pooling:
             # Reshape to (B, n_weights * feature_dim)
             return features.view(features.size(0), -1)

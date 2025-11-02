@@ -2,12 +2,19 @@ import torch
 import pathlib
 
 
-def collate_fn(batch):
+def collate_fn(batch, transpose=False):
     """Pad all the point clouds to have the same size."""
-    input_tensor = torch.nested.as_nested_tensor(
-        [x[0] for x in batch], layout=torch.jagged
-    ).to_padded_tensor(padding=0.0)
-    mask = input_tensor.sum(-1) != 0
+    if transpose:
+        input_tensor = torch.nested.as_nested_tensor(
+            [x[0].T for x in batch], layout=torch.jagged
+        )
+        # All true (no need for mask since nested tensor)
+        mask = torch.ones(input_tensor.shape[:-1], dtype=torch.bool)
+    else:
+        input_tensor = torch.nested.as_nested_tensor(
+            [x[0] for x in batch], layout=torch.jagged
+        ).to_padded_tensor(padding=0.0)
+        mask = input_tensor.sum(-1) != 0
     labels = torch.LongTensor([x[1] for x in batch])
 
     return input_tensor, mask, labels

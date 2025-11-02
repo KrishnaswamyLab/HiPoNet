@@ -5,8 +5,10 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 import wandb
+
 from utils.read_data import load_data
 from utils.training import collate_fn
+from functools import partial
 
 from models.graph_learning import HiPoNet, MLP
 from argparse import ArgumentParser
@@ -53,6 +55,10 @@ parser.add_argument(
     action="store_true",
     help="If set, use orthogonality loss on the alpha parameter",
 )
+parser.add_argument(
+    "--transpose",
+    action="store_true"
+)
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -84,17 +90,18 @@ def train(model: nn.Module, PCs, labels):
         weight_decay=args.wd,
     )
     train_idx, test_idx = train_test_split(np.arange(len(labels)), test_size=0.2)
+    collator = partial(collate_fn, transpose=args.transpose)
     train_loader = DataLoader(
         [(PCs[i], labels[i]) for i in train_idx],
         batch_size=args.batch_size,
         shuffle=True,
-        collate_fn=collate_fn,
+        collate_fn=collator,
     )
     test_loader = DataLoader(
         [(PCs[i], labels[i]) for i in test_idx],
         batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=collate_fn,
+        collate_fn=collator,
     )
     total_n_batches = len(train_loader)
     loss_fn = torch.nn.CrossEntropyLoss()
@@ -160,16 +167,18 @@ def train(model: nn.Module, PCs, labels):
             )
     print(f"Best accuracy : {best_acc}")
 
-class ClassificationModel(nn.Module):
-        def __init__(self, hiponet, mlp_classifier):
-            super().__init__()
-            self.hiponet = hiponet
-            self.mlp_classifier = mlp_classifier
 
-        def forward(self, batch, mask):
-            out1 = self.hiponet(batch, mask)
-            out2 = self.mlp_classifier(out1)
-            return out2
+class ClassificationModel(nn.Module):
+    def __init__(self, hiponet, mlp_classifier):
+        super().__init__()
+        self.hiponet = hiponet
+        self.mlp_classifier = mlp_classifier
+
+    def forward(self, batch, mask):
+        out1 = self.hiponet(batch, mask)
+        out2 = self.mlp_classifier(out1)
+        return out2
+
 
 def main():
     import os
@@ -177,28 +186,43 @@ def main():
     assert args.batch_size % 2 == 0, "Batch size must be even"
     args.effective_batch_size = args.batch_size * args.n_accumulate
 
+    if args.transpose:
+        print("Setting ignore_alphas=True for tranpose")
+        args.ignore_alphas = True
+
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
+
+    PCs, labels, num_labels = load_data(args.raw_dir, args.full)
+    if os.environ.get("SMOKE_TEST"):
+        PCs = [pc[: 60 + i] for i, pc in enumerate(PCs[:100])]
+        labels = labels[:100]
+        args.disable_wb = True
+
     wandb.init(
         project="pointcloud-net-k-fold",
         config=config,
         mode="disabled" if args.disable_wb else None,
     )
 
-    PCs, labels, num_labels = load_data(args.raw_dir, args.full)
+    input_dim = PCs[0].shape[0 if args.transpose else 1]
     hiponet = HiPoNet(
-        PCs[0].shape[1],
+        input_dim,
         args.num_weights,
         args.threshold,
         args.K,
         args.J,
         args.device,
         args.sigma,
+        ignore_alphas=args.transpose,
     )
     with torch.no_grad():
         batch = PCs[0].to(args.device)[None, ...]
+        if args.transpose:
+            batch = batch.T
         mask = batch.sum(-1) != 0
-        input_dim = hiponet(PCs[0].to(args.device)[None, ...], mask).shape[1]
+        input_dim = hiponet(batch, mask).shape[1]
+
     mlp_classifier = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(
         args.device
     )
