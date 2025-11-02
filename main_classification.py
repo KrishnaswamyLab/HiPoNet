@@ -219,7 +219,7 @@ def main():
     with torch.no_grad():
         batch = PCs[0].to(args.device)[None, ...]
         if args.transpose:
-            batch = batch.T
+            batch = batch.permute(0, 2, 1)
         mask = batch.sum(-1) != 0
         input_dim = hiponet(batch, mask).shape[1]
 

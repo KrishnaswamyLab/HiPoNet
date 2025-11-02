@@ -22,7 +22,7 @@ class GraphWaveletTransform(nn.Module):
         self.J = J
         self.pooling = pooling
 
-    def generate_timepoint_features(self, P, X, mask):
+    def generate_timepoint_features(self, P, X, mask, transpose=False):
         """Generates graph wavelet features.
 
         There are three types of features:
@@ -67,7 +67,9 @@ class GraphWaveletTransform(nn.Module):
         F0 = torch.mm(P_powered, X).unsqueeze(0)
         features = torch.cat([F0, *F1, *F2])
 
-        if self.pooling:
+        if transpose:
+            features = (features.sum(dim=-1) / mask.sum()).flatten()
+        elif self.pooling:
             # We *sum* instead of mean, since we want to ignore masked-out nodes
             features = (features.sum(dim=1) / mask.sum()).flatten()
         else:
@@ -86,6 +88,11 @@ class GraphWaveletTransform(nn.Module):
 
     def forward(self, P, X, mask):
         if len(P.shape) == 3:
-            return self.single_batch_forward(P, X, mask)
+            if X.is_nested:
+                X = X.to_padded_tensor(0.)
+            mask = X.sum(1) != 0
+            return self.single_batch_forward(
+                P, X, mask, transpose=True
+            )
         else:
             return self.double_batch_forward(P, X, mask)
