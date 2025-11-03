@@ -55,10 +55,7 @@ parser.add_argument(
     action="store_true",
     help="If set, use orthogonality loss on the alpha parameter",
 )
-parser.add_argument(
-    "--transpose",
-    action="store_true"
-)
+parser.add_argument("--transpose", action="store_true")
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -74,6 +71,7 @@ def test(model, loader):
     total = 0
     with torch.no_grad():
         for batch, mask, labels in loader:
+            batch, mask = batch.to(args.device), mask.to(args.device)
             logits = model(batch, mask)
             labels = labels.to(logits.device)
             preds = torch.argmax(logits, dim=1)
@@ -114,6 +112,7 @@ def train(model: nn.Module, PCs, labels):
             opt.zero_grad()
             minibatches_per_batch = args.n_accumulate
             for i, (batch, mask, labels) in enumerate(train_loader, start=1):
+                batch, mask = batch.to(args.device), mask.to(args.device)
                 logits = model(batch, mask)
                 labels = labels.to(logits.device)
                 preds = torch.argmax(logits, dim=1)
@@ -227,7 +226,7 @@ def main():
         args.device
     )
     model = ClassificationModel(hiponet, mlp_classifier)
-    if not args.transpose: 
+    if not args.transpose:
         model = nn.DataParallel(model)
     train(model, PCs, labels)
 
