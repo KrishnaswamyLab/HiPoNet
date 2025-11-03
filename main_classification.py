@@ -226,7 +226,9 @@ def main():
     mlp_classifier = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(
         args.device
     )
-    model = nn.DataParallel(ClassificationModel(hiponet, mlp_classifier))
+    model = ClassificationModel(hiponet, mlp_classifier)
+    if not args.transpose: 
+        model = nn.DataParallel(model)
     train(model, PCs, labels)
 
 
