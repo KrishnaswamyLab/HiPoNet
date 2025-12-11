@@ -5,12 +5,9 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 import wandb
-
 from utils.read_data import load_data
-from utils.training import collate_fn
-from functools import partial
 
-from models.graph_learning import HiPoNet, MLP
+from models.transformer import Transformer
 from argparse import ArgumentParser
 
 import gc
@@ -27,19 +24,20 @@ parser.add_argument(
 )
 parser.add_argument("--full", action="store_true")
 parser.add_argument("--task", type=str, default="prolif", help="Task on PDO data")
-parser.add_argument("--num_weights", type=int, default=2, help="Number of weights")
 parser.add_argument(
-    "--threshold", type=float, default=0.5, help="Threshold for creating the graph"
+    "--hidden_dim", type=int, default=2048, help="Hidden dim for the feedforward layers"
 )
-parser.add_argument("--sigma", type=float, default=0.5, help="Bandwidth")
-parser.add_argument("--K", type=int, default=1, help="Order of simplicial complex")
-parser.add_argument("--J", type=int, default=3, help="Number of wavelet scales")
 parser.add_argument(
-    "--hidden_dim", type=int, default=256, help="Hidden dim for the MLP"
+    "--num_layers", type=int, default=3, help="Number of Transformer blocks"
 )
-parser.add_argument("--num_layers", type=int, default=3, help="Number of MLP layers")
+parser.add_argument(
+    "--embedding-dim", type=int, default=128, help="Embedding dimension for attention. The input is linearly transformed to this."
+)
+parser.add_argument("--nhead", type=int, default=4, help="Number of attention heads")
+parser.add_argument("--swiglu", action="store_true")
 parser.add_argument("--lr", type=float, default=0.01, help="Learning Rate")
 parser.add_argument("--wd", type=float, default=3e-3, help="Weight decay")
+parser.add_argument("--dropout", type=float, default=0.1, help="dropout")
 parser.add_argument("--num_epochs", type=int, default=20, help="Number of epochs")
 parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
 parser.add_argument("--gpu", type=int, default=0, help="GPU index")
@@ -50,12 +48,6 @@ parser.add_argument(
     type=int,
     help="number of batches to accumulate gradients over",
 )
-parser.add_argument(
-    "--orthogonal",
-    action="store_true",
-    help="If set, use orthogonality loss on the alpha parameter",
-)
-parser.add_argument("--transpose", action="store_true")
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -65,14 +57,24 @@ else:
     args.device = "cpu"
 
 
+def collate_fn(batch):
+    """Create nested tensors."""
+    input_tensor = torch.nested.as_nested_tensor(
+        [x[0] for x in batch], layout=torch.jagged
+    )
+    sizes = torch.Tensor([len(x[0]) for x in batch]).unsqueeze(1)
+    labels = torch.LongTensor([x[1] for x in batch])
+
+    return input_tensor, sizes, labels
+
+
 def test(model, loader):
     model.eval()
     correct = 0
     total = 0
     with torch.no_grad():
-        for batch, mask, labels in loader:
-            batch, mask = batch.to(args.device), mask.to(args.device)
-            logits = model(batch, mask)
+        for batch, sizes, labels in loader:
+            logits = model(batch, sizes)
             labels = labels.to(logits.device)
             preds = torch.argmax(logits, dim=1)
             correct += torch.sum(preds == labels).detach().float().item()
@@ -87,19 +89,19 @@ def train(model: nn.Module, PCs, labels):
         lr=args.lr,
         weight_decay=args.wd,
     )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.num_epochs)
     train_idx, test_idx = train_test_split(np.arange(len(labels)), test_size=0.2)
-    collator = partial(collate_fn, transpose=args.transpose)
     train_loader = DataLoader(
         [(PCs[i], labels[i]) for i in train_idx],
         batch_size=args.batch_size,
         shuffle=True,
-        collate_fn=collator,
+        collate_fn=collate_fn,
     )
     test_loader = DataLoader(
         [(PCs[i], labels[i]) for i in test_idx],
         batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=collator,
+        collate_fn=collate_fn,
     )
     total_n_batches = len(train_loader)
     loss_fn = torch.nn.CrossEntropyLoss()
@@ -111,40 +113,29 @@ def train(model: nn.Module, PCs, labels):
             model.train()
             opt.zero_grad()
             minibatches_per_batch = args.n_accumulate
-            for i, (batch, mask, labels) in enumerate(train_loader, start=1):
-                batch, mask = batch.to(args.device), mask.to(args.device)
-                logits = model(batch, mask)
+            for i, (batch, sizes, labels) in enumerate(train_loader, start=1):
+                logits = model(batch, sizes)
                 labels = labels.to(logits.device)
                 preds = torch.argmax(logits, dim=1)
                 correct_train += torch.sum(preds == labels).detach().float().item()
                 loss = loss_fn(logits, labels)
-                if args.orthogonal:
-                    alphas = model.module[0].layer.alphas
-                    loss += (
-                        0.1
-                        * (
-                            alphas @ alphas.T
-                            - torch.eye(args.num_weights).to(args.device)
-                        )
-                        .square()
-                        .mean()
-                    )
                 loss /= minibatches_per_batch
                 t_loss += loss.detach().item()
                 loss.backward()
 
                 if (i % args.n_accumulate == 0) or i == total_n_batches:
                     opt.step()
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
                     opt.zero_grad()
                     minibatches_per_batch = min(args.n_accumulate, total_n_batches - i)
 
                 del (logits, loss, preds)
                 torch.cuda.empty_cache()
                 gc.collect()
-
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
+        
+            scheduler.step()
 
             train_acc = correct_train * 100 / len(train_idx)
             test_acc = test(model, test_loader)
@@ -167,64 +158,37 @@ def train(model: nn.Module, PCs, labels):
     print(f"Best accuracy : {best_acc}")
 
 
-class ClassificationModel(nn.Module):
-    def __init__(self, hiponet, mlp_classifier):
-        super().__init__()
-        self.hiponet = hiponet
-        self.mlp_classifier = mlp_classifier
-
-    def forward(self, batch, mask):
-        out1 = self.hiponet(batch, mask)
-        out2 = self.mlp_classifier(out1)
-        return out2
-
-
 def main():
     import os
 
     assert args.batch_size % 2 == 0, "Batch size must be even"
     args.effective_batch_size = args.batch_size * args.n_accumulate
 
-    if args.transpose:
-        print("Setting ignore_alphas=True for tranpose")
-        args.ignore_alphas = True
-
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
-
-    PCs, labels, num_labels = load_data(args.raw_dir, args.full)
-    if os.environ.get("SMOKE_TEST"):
-        PCs = [pc[: 60 + i] for i, pc in enumerate(PCs[:100])]
-        labels = labels[:100]
-        args.disable_wb = True
-
     wandb.init(
-        project="pointcloud-net-k-fold",
+        project="pointcloud-net-transformer",
         config=config,
         mode="disabled" if args.disable_wb else None,
     )
 
-    input_dim = PCs[0].shape[0 if args.transpose else 1]
-    hiponet = HiPoNet(
-        input_dim,
-        args.num_weights,
-        args.threshold,
-        args.K,
-        args.J,
-        args.device,
-        args.sigma,
-        ignore_alphas=args.transpose,
-    )
-    with torch.no_grad():
-        input_dim = model([PCs[0].to(args.device)], args.sigma).shape[1]
-    mlp = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(args.device)
-    model_path = f"saved_models/model_{args.raw_dir}_{args.num_weights}_persistence_prediction.pth"
+    PCs, labels, num_labels = load_data(args.raw_dir, args.full)
 
-    # torch.save({
-    #     'model_state_dict': model.state_dict(),
-    #     'mlp_state_dict': mlp.state_dict(),
-    #     'best_acc': 0,
-    #     'args': args
-    # }, model_path)
-    
-    train(model, mlp, PCs, labels)
+    model = nn.DataParallel(
+        Transformer(
+            PCs[0].shape[1],
+            128,
+            num_labels,
+            nhead=args.nhead,
+            num_layers=args.num_layers,
+            dim_feedforward=args.hidden_dim,
+            dropout=args.dropout,
+            activation=torch.nn.functional.gelu,
+            use_swiglu=args.swiglu,
+        )
+    )
+    train(model, PCs, labels)
+
+
+if __name__ == "__main__":
+    main()
