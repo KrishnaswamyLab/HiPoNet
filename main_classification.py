@@ -216,20 +216,15 @@ def main():
         ignore_alphas=args.transpose,
     )
     with torch.no_grad():
-        batch = PCs[0].to(args.device)[None, ...]
-        if args.transpose:
-            batch = batch.permute(0, 2, 1)
-        mask = batch.sum(-1) != 0
-        input_dim = hiponet(batch, mask).shape[1]
+        input_dim = model([PCs[0].to(args.device)], args.sigma).shape[1]
+    mlp = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(args.device)
+    model_path = f"saved_models/model_{args.raw_dir}_{args.num_weights}_persistence_prediction.pth"
 
-    mlp_classifier = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(
-        args.device
-    )
-    model = ClassificationModel(hiponet, mlp_classifier)
-    if not args.transpose:
-        model = nn.DataParallel(model)
-    train(model, PCs, labels)
-
-
-if __name__ == "__main__":
-    main()
+    # torch.save({
+    #     'model_state_dict': model.state_dict(),
+    #     'mlp_state_dict': mlp.state_dict(),
+    #     'best_acc': 0,
+    #     'args': args
+    # }, model_path)
+    
+    train(model, mlp, PCs, labels)
