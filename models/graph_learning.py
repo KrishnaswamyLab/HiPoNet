@@ -34,7 +34,8 @@ def single_batched_compute_dist(X):
 
 
 # compute dist, but batched over the graph dim and the alphas dim
-double_batched_compute_dist = torch.vmap(torch.vmap(single_batched_compute_dist))
+# double_batched_compute_dist = torch.vmap(torch.vmap(single_batched_compute_dist))
+double_batched_compute_dist = torch.vmap(torch.vmap(compute_dist))
 
 
 def compute_diffusion_from_dist(W, sigma, threshold, mask):
@@ -78,7 +79,7 @@ def compute_diffusion_matrix(
     X_bar = point_clouds
     if alphas is not None:
         X_bar = X_bar.unsqueeze(1)
-        X_bar *= alphas[None, :, None, :]
+        X_bar = X_bar * alphas[None, :, None, :]
         W = double_batched_compute_dist(X_bar)
     else:
         # Don't need to batch over alphas dim
