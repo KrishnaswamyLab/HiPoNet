@@ -55,7 +55,34 @@ parser.add_argument(
     action="store_true",
     help="If set, use orthogonality loss on the alpha parameter",
 )
+parser.add_argument(
+    "--sparse",
+    action="store_true",
+    help="If set, add L1 sparsity loss on alphas to encourage each view to focus on fewer features",
+)
+parser.add_argument(
+    "--sparse_lambda",
+    type=float,
+    default=0.01,
+    help="Weight for the L1 sparsity loss on alphas",
+)
 parser.add_argument("--transpose", action="store_true")
+parser.add_argument(
+    "--use_geometric_laplacian",
+    action="store_true",
+    help="Use metric-aware geometric Hodge Laplacian (requires K >= 2)",
+)
+parser.add_argument(
+    "--diffusion_steps",
+    type=int,
+    default=1,
+    help="Number of diffusion steps t for computing P^t (used for diffusion distances)",
+)
+parser.add_argument(
+    "--use_attention",
+    action="store_true",
+    help="Use DeepSet attention pooling over simplices (K >= 2). Enables interpretable attention weights.",
+)
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -140,6 +167,8 @@ def train(model, mlp, PCs, labels):
                         .square()
                         .mean()
                     )
+                if args.sparse:
+                    loss += args.sparse_lambda * model.layer.alphas.abs().sum()
                 loss /= minibatches_per_batch
                 t_loss += loss.detach().item()
                 loss.backward()
@@ -219,6 +248,9 @@ def main():
         args.device,
         args.sigma,
         ignore_alphas=args.transpose,
+        use_geometric_laplacian=args.use_geometric_laplacian,
+        diffusion_steps=args.diffusion_steps,
+        use_attention=args.use_attention,
     )
     with torch.no_grad():
         # Create proper batch and mask for dimension inference

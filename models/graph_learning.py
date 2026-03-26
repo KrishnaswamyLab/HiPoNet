@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.GWT import GraphWaveletTransform
+from models.SWT import SimplicialWaveletTransform, PoolingAttention
 import gc
 
 gc.enable()
@@ -142,7 +143,7 @@ class GraphFeatLearningLayer(nn.Module):
             "n_weights > 1 not supported without pooling"
         )
 
-    def forward(self, point_clouds, mask):
+    def forward(self, point_clouds, mask, node_features=None):
         if self.ignore_alphas:
             alphas = None
         elif self.normalize_alphas:
@@ -162,6 +163,11 @@ class GraphFeatLearningLayer(nn.Module):
             mask,
             self.use_alphas_for_connectivity_only,
         )
+        # If separate node features are provided (e.g. gene expression for a
+        # spatial view where coords only define the graph), use them instead.
+        if node_features is not None:
+            X_bar = node_features.unsqueeze(1).expand(-1, self.n_weights, -1, -1)
+
         if alphas is not None:
             # Mask has shape (B, N), expand to (B, n_weights, N) to match W and X_bar
             mask = mask.unsqueeze(1).expand((-1, self.n_weights, -1))
@@ -549,6 +555,159 @@ class SimplicialFeatLearningLayerTetra(nn.Module):
         return features.view(B_pc, features.shape[1] * self.n_weights)
 
 
+class SimplicialFeatLearningLayer(nn.Module):
+    """Unified simplicial feature learning layer using SWT with proper Hodge Laplacians.
+
+    Replaces the broken SimplicialFeatLearningLayerTri/Tetra with a correct
+    implementation that uses the SimplicialWaveletTransform pipeline.
+
+    Supports both combinatorial and geometric (metric-aware) Hodge Laplacians.
+
+    Parameters
+    ----------
+    n_weights : int
+        Number of learnable alpha weight vectors.
+    dimension : int
+        Feature dimension of input point clouds.
+    threshold : float
+        Threshold for graph/complex construction.
+    sigma : float
+        Gaussian kernel bandwidth.
+    J : int
+        Number of wavelet scales.
+    device : torch.device or str
+    pooling : bool
+        If True, pool features across nodes.
+    max_simplex_dim : int
+        Maximum simplex dimension (2=triangles, 3=tetrahedra).
+    use_geometric_laplacian : bool
+        If True, use diffusion distances + Cayley-Menger mass matrices for
+        the geometric Hodge Laplacian. Fully differentiable w.r.t. alphas.
+    diffusion_steps : int
+        Number of steps t for P^t when computing diffusion distances.
+    """
+
+    def __init__(
+        self,
+        n_weights,
+        dimension,
+        threshold,
+        sigma,
+        J,
+        device,
+        pooling=True,
+        max_simplex_dim=2,
+        use_geometric_laplacian=False,
+        diffusion_steps=1,
+        use_attention=False,
+    ):
+        super().__init__()
+        self.alphas = nn.Parameter(
+            torch.rand((n_weights, dimension), requires_grad=True).to(device)
+        )
+        self.n_weights = n_weights
+        self.dimension = dimension
+        self.threshold = threshold
+        self.sigma = sigma
+        self.J = J
+        self.device = device
+        self.pooling = pooling
+        self.max_simplex_dim = max_simplex_dim
+        self.use_geometric_laplacian = use_geometric_laplacian
+        self.diffusion_steps = diffusion_steps
+        self.use_attention = use_attention
+
+        if use_attention:
+            self.pool_attn = nn.ModuleList(
+                [PoolingAttention(dimension).to(device) for _ in range(max_simplex_dim + 1)]
+            )
+        else:
+            self.pool_attn = None
+
+    def forward(self, point_clouds, mask, node_features=None):
+        """Compute simplicial wavelet features for a batch of point clouds.
+
+        Parameters
+        ----------
+        point_clouds : torch.Tensor, shape (B, N, d_coord)
+            Padded batch of point clouds used to build the graph/complex topology.
+        mask : torch.Tensor, shape (B, N)
+            Boolean mask for valid (non-padded) points.
+        node_features : torch.Tensor, shape (B, N, d_feat), optional
+            If provided, these are used as node signals in the wavelet transform
+            instead of the (alpha-reweighted) coordinates. Useful for spatial
+            views where coords define topology but gene expression is the signal.
+
+        Returns
+        -------
+        features : torch.Tensor, shape (B, n_weights * feature_dim)
+            Pooled simplicial wavelet features.
+        """
+        B_pc = point_clouds.shape[0]
+        all_features = []
+
+        for p in range(B_pc):
+            # Extract valid points for this sample
+            valid = mask[p]
+            pc = point_clouds[p][valid]  # (N_pts, d_coord)
+            nf = node_features[p][valid] if node_features is not None else None
+            weight_features = []
+
+            for w in range(self.n_weights):
+                alpha_w = self.alphas[w]
+                X_w = pc * alpha_w  # used for graph topology
+
+                # Node signal: gene features (if provided) else coord-based X_w
+                X_signal = nf if nf is not None else X_w
+
+                # Build adjacency matrix via Gaussian kernel + threshold
+                D = compute_dist(X_w)
+                W = torch.exp(-D / self.sigma)
+                adj = torch.where(W >= self.threshold, W, torch.zeros_like(W))
+
+                # Compute squared diffusion distances if using geometric Laplacian.
+                # Row-normalize adj -> P, raise to diffusion_steps, then take
+                # pairwise L2 distances between rows. Fully differentiable.
+                sq_diff_dists = None
+                if self.use_geometric_laplacian:
+                    d = adj.sum(dim=1, keepdim=True).clamp_min(1e-8)
+                    P = adj / d
+                    Pt = torch.linalg.matrix_power(P, self.diffusion_steps)
+                    sq_diff_dists = compute_dist(Pt)
+
+                # Build SWT and compute wavelet coefficients
+                swt = SimplicialWaveletTransform(
+                    adj,
+                    X_signal,
+                    self.threshold,
+                    self.device,
+                    use_geometric_laplacian=self.use_geometric_laplacian,
+                    sq_diff_dists=sq_diff_dists,
+                )
+                coeff = swt.calculate_wavelet_coeff(self.J, pool_attn=self.pool_attn)
+                weight_features.append(coeff)
+
+            # Concatenate features across weights
+            all_features.append(torch.cat(weight_features))
+
+        # Stack batch
+        features = torch.stack(all_features, dim=0)  # (B, n_weights * feat_dim)
+        return features
+
+    def get_attention_weights(self):
+        """Return last attention weights per simplex dimension for interpretability.
+
+        Returns
+        -------
+        dict[int, torch.Tensor | None]
+            Maps simplex dimension to attention weights from the most recent
+            forward pass, or None if attention is disabled.
+        """
+        if self.pool_attn is None:
+            return {}
+        return {k: attn.last_weights for k, attn in enumerate(self.pool_attn)}
+
+
 class HiPoNet(nn.Module):
     def __init__(
         self,
@@ -564,6 +723,9 @@ class HiPoNet(nn.Module):
         ignore_alphas=False,
         use_alphas_for_connectivity_only=False,
         softmax_alphas=False,
+        use_geometric_laplacian=False,
+        diffusion_steps=1,
+        use_attention=False,
     ):
         super(HiPoNet, self).__init__()
         self.dimension = dimension
@@ -581,19 +743,31 @@ class HiPoNet(nn.Module):
                 use_alphas_for_connectivity_only=use_alphas_for_connectivity_only,
                 softmax_alphas=softmax_alphas,
             )
-        elif K == 2:
-            self.layer = SimplicialFeatLearningLayerTri(
-                n_weights, dimension, threshold, sigma, J, device, pooling=pooling
-            )
-        else:
-            self.layer = SimplicialFeatLearningLayerTetra(
-                n_weights, dimension, threshold, sigma, J, device, pooling=pooling
+        elif K >= 2:
+            self.layer = SimplicialFeatLearningLayer(
+                n_weights,
+                dimension,
+                threshold,
+                sigma,
+                J,
+                device,
+                pooling=pooling,
+                max_simplex_dim=K,
+                use_geometric_laplacian=use_geometric_laplacian,
+                diffusion_steps=diffusion_steps,
+                use_attention=use_attention,
             )
         self.device = device
         self.sigma = sigma
 
-    def forward(self, batch, mask):
-        return self.layer(batch, mask)
+    def forward(self, batch, mask, node_features=None):
+        return self.layer(batch, mask, node_features=node_features)
+
+    def get_attention_weights(self):
+        """Proxy to layer's attention weights (K>=2 only)."""
+        if hasattr(self.layer, 'get_attention_weights'):
+            return self.layer.get_attention_weights()
+        return {}
 
 
 class MLP(nn.Module):

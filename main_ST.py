@@ -31,6 +31,8 @@ parser.add_argument(
 parser.add_argument("--label_name", type=str, default="pTR_label", help="Label name")
 parser.add_argument("--full", action="store_true")
 parser.add_argument("--orthogonal", action="store_true")
+parser.add_argument("--sparse", action="store_true", help="Add L1 sparsity loss on alphas")
+parser.add_argument("--sparse_lambda", type=float, default=0.01, help="Weight for L1 sparsity loss")
 parser.add_argument("--model", type=str, default="graph", help="Type of structure")
 parser.add_argument("--task", type=str, default="AUC")
 parser.add_argument("--num_weights", type=int, default=2, help="Number of weights")
@@ -74,7 +76,10 @@ def eval_roc_auc(model_spatial, model_gene, mlp, spaital_PCs, gene_PCs, labels, 
     pred = []
     with torch.no_grad():
         for idx in loader:
-            X_spatial = model_spatial([spaital_PCs[i].to(args.device) for i in idx])
+            X_spatial = model_spatial(
+                [spaital_PCs[i].to(args.device) for i in idx],
+                node_features=[gene_PCs[i].to(args.device) for i in idx],
+            )
             X_gene = model_gene([gene_PCs[i].to(args.device) for i in idx])
             logits = mlp(torch.cat([X_spatial, X_gene], 1))
             preds = torch.argmax(logits, dim=1)
@@ -147,12 +152,17 @@ def train(model_spatial, model_gene, mlp, spaital_PCs, gene_PCs, labels):
             for idx in train_loader:
                 opt.zero_grad()
 
-                X_spatial = model_spatial([spaital_PCs[i].to(args.device) for i in idx])
+                X_spatial = model_spatial(
+                    [spaital_PCs[i].to(args.device) for i in idx],
+                    node_features=[gene_PCs[i].to(args.device) for i in idx],
+                )
                 X_gene = model_gene([gene_PCs[i].to(args.device) for i in idx])
                 logits = mlp(torch.cat([X_spatial, X_gene], 1))
-                # import pdb; pdb.set_trace()
                 preds.append(torch.argmax(logits, dim=1))
-                loss = loss_fn(logits, labels[idx])  # *10
+                loss = loss_fn(logits, labels[idx])
+                if args.sparse:
+                    for m in [model_spatial, model_gene]:
+                        loss += args.sparse_lambda * m.layer.alphas.abs().sum()
                 loss.backward()
                 opt.step()
 
@@ -193,7 +203,7 @@ if __name__ == "__main__":
     # spaital_PCs, gene_PCs, labels, num_labels = load_data_ST_melanoma(args.raw_dir)
     model_spatial = (
         HiPoNet(
-            dimension=spaital_PCs[0].shape[1],
+            dimension=gene_PCs[0].shape[1],
             n_weights=1,
             threshold=args.spatial_threshold,
             K=args.K,
