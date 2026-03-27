@@ -43,3 +43,7 @@ LICENSE.md
 data/**
 *.out
 *.pyc
+.claude
+.venv
+.pytest_cache
+__pycache__

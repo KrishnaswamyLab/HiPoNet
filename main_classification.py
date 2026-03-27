@@ -22,7 +22,7 @@ parser = ArgumentParser(description="Pointcloud net")
 parser.add_argument(
     "--raw_dir",
     type=str,
-    default="COVID_data",
+    default="pdo_data",
     help="Directory where the raw data is stored",
 )
 parser.add_argument("--full", action="store_true")
@@ -41,7 +41,7 @@ parser.add_argument("--num_layers", type=int, default=3, help="Number of MLP lay
 parser.add_argument("--lr", type=float, default=0.01, help="Learning Rate")
 parser.add_argument("--wd", type=float, default=3e-3, help="Weight decay")
 parser.add_argument("--num_epochs", type=int, default=20, help="Number of epochs")
-parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
 parser.add_argument("--gpu", type=int, default=0, help="GPU index")
 parser.add_argument("--disable_wb", action="store_true", help="Disable wandb logging")
 parser.add_argument(
@@ -55,7 +55,34 @@ parser.add_argument(
     action="store_true",
     help="If set, use orthogonality loss on the alpha parameter",
 )
+parser.add_argument(
+    "--sparse",
+    action="store_true",
+    help="If set, add L1 sparsity loss on alphas to encourage each view to focus on fewer features",
+)
+parser.add_argument(
+    "--sparse_lambda",
+    type=float,
+    default=0.01,
+    help="Weight for the L1 sparsity loss on alphas",
+)
 parser.add_argument("--transpose", action="store_true")
+parser.add_argument(
+    "--use_geometric_laplacian",
+    action="store_true",
+    help="Use metric-aware geometric Hodge Laplacian (requires K >= 2)",
+)
+parser.add_argument(
+    "--diffusion_steps",
+    type=int,
+    default=1,
+    help="Number of diffusion steps t for computing P^t (used for diffusion distances)",
+)
+parser.add_argument(
+    "--use_attention",
+    action="store_true",
+    help="Use DeepSet attention pooling over simplices (K >= 2). Enables interpretable attention weights.",
+)
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -65,14 +92,16 @@ else:
     args.device = "cpu"
 
 
-def test(model, loader):
+def test(model, mlp, loader):
     model.eval()
+    mlp.eval()
     correct = 0
     total = 0
     with torch.no_grad():
         for batch, mask, labels in loader:
             batch, mask = batch.to(args.device), mask.to(args.device)
-            logits = model(batch, mask)
+            X = model(batch, mask)
+            logits = mlp(X)
             labels = labels.to(logits.device)
             preds = torch.argmax(logits, dim=1)
             correct += torch.sum(preds == labels).detach().float().item()
@@ -80,13 +109,14 @@ def test(model, loader):
     return (correct * 100) / total
 
 
-def train(model: nn.Module, PCs, labels):
+def train(model, mlp, PCs, labels):
     print(args)
     opt = torch.optim.AdamW(
-        list(model.parameters()),
+        list(model.parameters()) + list(mlp.parameters()),
         lr=args.lr,
         weight_decay=args.wd,
     )
+    # print("Preparing data loaders...")
     train_idx, test_idx = train_test_split(np.arange(len(labels)), test_size=0.2)
     collator = partial(collate_fn, transpose=args.transpose)
     train_loader = DataLoader(
@@ -104,22 +134,30 @@ def train(model: nn.Module, PCs, labels):
     total_n_batches = len(train_loader)
     loss_fn = torch.nn.CrossEntropyLoss()
     best_acc = 0
+    
+    # Log initial alpha values
+    for k in range(len(model.layer.alphas)):
+        for d in range(len(model.layer.alphas[k])):
+            wandb.log({f'Alpha{k}_{d}': model.layer.alphas[k][d].item()}, step=0)
+    
     with tqdm(range(args.num_epochs)) as tq:
         for epoch in tq:
             correct_train = 0
             t_loss = 0
             model.train()
+            mlp.train()
             opt.zero_grad()
             minibatches_per_batch = args.n_accumulate
             for i, (batch, mask, labels) in enumerate(train_loader, start=1):
                 batch, mask = batch.to(args.device), mask.to(args.device)
-                logits = model(batch, mask)
+                X = model(batch, mask)
+                logits = mlp(X)
                 labels = labels.to(logits.device)
                 preds = torch.argmax(logits, dim=1)
                 correct_train += torch.sum(preds == labels).detach().float().item()
                 loss = loss_fn(logits, labels)
                 if args.orthogonal:
-                    alphas = model.module[0].layer.alphas
+                    alphas = model.layer.alphas
                     loss += (
                         0.1
                         * (
@@ -129,6 +167,8 @@ def train(model: nn.Module, PCs, labels):
                         .square()
                         .mean()
                     )
+                if args.sparse:
+                    loss += args.sparse_lambda * model.layer.alphas.abs().sum()
                 loss /= minibatches_per_batch
                 t_loss += loss.detach().item()
                 loss.backward()
@@ -138,7 +178,7 @@ def train(model: nn.Module, PCs, labels):
                     opt.zero_grad()
                     minibatches_per_batch = min(args.n_accumulate, total_n_batches - i)
 
-                del (logits, loss, preds)
+                del (X, logits, loss, preds)
                 torch.cuda.empty_cache()
                 gc.collect()
 
@@ -147,9 +187,15 @@ def train(model: nn.Module, PCs, labels):
                     wandb.log({f"{name}.grad": param.grad.norm()}, step=epoch + 1)
 
             train_acc = correct_train * 100 / len(train_idx)
-            test_acc = test(model, test_loader)
+            test_acc = test(model, mlp, test_loader)
             if test_acc > best_acc:
                 best_acc = test_acc
+            
+            # Log alpha values
+            for k in range(len(model.layer.alphas)):
+                for d in range(len(model.layer.alphas[k])):
+                    wandb.log({f'Alpha{k}_{d}': model.layer.alphas[k][d].item()}, step=epoch + 1)
+            
             wandb.log(
                 {
                     "Loss": t_loss,
@@ -165,18 +211,6 @@ def train(model: nn.Module, PCs, labels):
                 % (t_loss, train_acc, test_acc, best_acc)
             )
     print(f"Best accuracy : {best_acc}")
-
-
-class ClassificationModel(nn.Module):
-    def __init__(self, hiponet, mlp_classifier):
-        super().__init__()
-        self.hiponet = hiponet
-        self.mlp_classifier = mlp_classifier
-
-    def forward(self, batch, mask):
-        out1 = self.hiponet(batch, mask)
-        out2 = self.mlp_classifier(out1)
-        return out2
 
 
 def main():
@@ -214,17 +248,23 @@ def main():
         args.device,
         args.sigma,
         ignore_alphas=args.transpose,
+        use_geometric_laplacian=args.use_geometric_laplacian,
+        diffusion_steps=args.diffusion_steps,
+        use_attention=args.use_attention,
     )
     with torch.no_grad():
-        input_dim = model([PCs[0].to(args.device)], args.sigma).shape[1]
+        # Create proper batch and mask for dimension inference
+        pc_sample = PCs[0].to(args.device)
+        if args.transpose:
+            pc_sample = pc_sample.T
+        # Add batch dimension: (N, d) -> (1, N, d)
+        pc_sample = pc_sample.unsqueeze(0)
+        # Create mask: all points are valid
+        mask_sample = torch.ones((1, pc_sample.shape[1]), dtype=torch.bool, device=args.device)
+        input_dim = hiponet(pc_sample, mask_sample).shape[1]
     mlp = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(args.device)
-    model_path = f"saved_models/model_{args.raw_dir}_{args.num_weights}_persistence_prediction.pth"
-
-    # torch.save({
-    #     'model_state_dict': model.state_dict(),
-    #     'mlp_state_dict': mlp.state_dict(),
-    #     'best_acc': 0,
-    #     'args': args
-    # }, model_path)
     
-    train(model, mlp, PCs, labels)
+    train(hiponet, mlp, PCs, labels)
+
+if __name__ == "__main__":
+    main()
