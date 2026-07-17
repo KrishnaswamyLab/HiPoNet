@@ -183,6 +183,44 @@ class GraphFeatLearningLayer(nn.Module):
             # where num_points_i is the number of valid points in point_clouds[i] (or equivalently mask[i].sum())
             return features.squeeze(1)[mask]
 
+    def forward_with_W(self, point_clouds, mask, node_features=None):
+        """Like forward() but also returns the diffusion matrix W for the GW loss.
+
+        Returns
+        -------
+        features : as returned by forward()
+        W        : (B, n_weights, N, N) diffusion operators (or (B, N, N) when
+                   ignore_alphas is True)
+        mask_out : the (possibly expanded) mask used internally
+        """
+        if self.ignore_alphas:
+            alphas = None
+        elif self.normalize_alphas:
+            norm_value = self.dimension**0.5
+            alphas = norm_value * self.alphas / self.alphas.norm(dim=1, keepdim=True)
+        elif self.softmax_alphas:
+            alphas = torch.nn.functional.softmax(self.alphas, dim=1)
+        else:
+            alphas = self.alphas
+        W, X_bar = compute_diffusion_matrix(
+            point_clouds,
+            alphas,
+            self.sigma,
+            self.threshold,
+            mask,
+            self.use_alphas_for_connectivity_only,
+        )
+        if node_features is not None:
+            X_bar = node_features.unsqueeze(1).expand(-1, self.n_weights, -1, -1)
+        mask_out = mask
+        if alphas is not None:
+            mask_out = mask.unsqueeze(1).expand((-1, self.n_weights, -1))
+        features = self.gwt(W, X_bar, mask_out)
+        if self.gwt.pooling:
+            return features.view(features.size(0), -1), W, mask
+        else:
+            return features.squeeze(1)[mask_out], W, mask
+
 
 class SimplicialFeatLearningLayerTri(nn.Module):
     def __init__(self, n_weights, dimension, threshold, device, pooling):
@@ -624,7 +662,49 @@ class SimplicialFeatLearningLayer(nn.Module):
         else:
             self.pool_attn = None
 
-    def forward(self, point_clouds, mask, node_features=None):
+    @staticmethod
+    def _normalize_operator(op: torch.Tensor | None) -> torch.Tensor | None:
+        """Convert a square operator to a row-stochastic matrix for GW costs."""
+        if op is None or op.numel() == 0:
+            return None
+        if op.dim() != 2 or op.shape[0] != op.shape[1] or op.shape[0] < 2:
+            return None
+        sym_op = 0.5 * (op + op.t())
+        sym_op = sym_op.clamp_min(0.0)
+        d = sym_op.sum(dim=1, keepdim=True).clamp_min(1e-8)
+        return sym_op / d
+
+    def _extract_simplex_operators(self, adj: torch.Tensor, swt: SimplicialWaveletTransform) -> list[torch.Tensor]:
+        """Build a compact set of simplex-level operators used by GW regularisation."""
+        ops: list[torch.Tensor] = []
+
+        node_op = self._normalize_operator(adj)
+        if node_op is not None:
+            ops.append(node_op)
+
+        edge_candidates = []
+        if len(swt.P_L) > 1 and swt.P_L[1] is not None:
+            edge_candidates.append(swt.P_L[1])
+        if len(swt.P_U) > 1 and swt.P_U[1] is not None:
+            edge_candidates.append(swt.P_U[1])
+        if edge_candidates:
+            edge_op = self._normalize_operator(sum(edge_candidates) / len(edge_candidates))
+            if edge_op is not None:
+                ops.append(edge_op)
+
+        tri_candidates = []
+        if len(swt.P_L) > 2 and swt.P_L[2] is not None:
+            tri_candidates.append(swt.P_L[2])
+        if len(swt.P_U) > 2 and swt.P_U[2] is not None:
+            tri_candidates.append(swt.P_U[2])
+        if tri_candidates:
+            tri_op = self._normalize_operator(sum(tri_candidates) / len(tri_candidates))
+            if tri_op is not None:
+                ops.append(tri_op)
+
+        return ops
+
+    def forward(self, point_clouds, mask, node_features=None, return_structure: bool = False):
         """Compute simplicial wavelet features for a batch of point clouds.
 
         Parameters
@@ -645,6 +725,7 @@ class SimplicialFeatLearningLayer(nn.Module):
         """
         B_pc = point_clouds.shape[0]
         all_features = []
+        all_structures = [] if return_structure else None
 
         for p in range(B_pc):
             # Extract valid points for this sample
@@ -652,6 +733,7 @@ class SimplicialFeatLearningLayer(nn.Module):
             pc = point_clouds[p][valid]  # (N_pts, d_coord)
             nf = node_features[p][valid] if node_features is not None else None
             weight_features = []
+            sample_structures = [] if return_structure else None
 
             for w in range(self.n_weights):
                 alpha_w = self.alphas[w]
@@ -686,13 +768,28 @@ class SimplicialFeatLearningLayer(nn.Module):
                 )
                 coeff = swt.calculate_wavelet_coeff(self.J, pool_attn=self.pool_attn)
                 weight_features.append(coeff)
+                if return_structure:
+                    sample_structures.append(self._extract_simplex_operators(adj, swt))
 
             # Concatenate features across weights
             all_features.append(torch.cat(weight_features))
+            if return_structure:
+                all_structures.append(sample_structures)
 
         # Stack batch
         features = torch.stack(all_features, dim=0)  # (B, n_weights * feat_dim)
+        if return_structure:
+            return features, all_structures
         return features
+
+    def forward_with_structure(self, point_clouds, mask, node_features=None):
+        """Forward pass returning GW-ready simplicial operators."""
+        return self.forward(
+            point_clouds,
+            mask,
+            node_features=node_features,
+            return_structure=True,
+        )
 
     def get_attention_weights(self):
         """Return last attention weights per simplex dimension for interpretability.
@@ -763,6 +860,31 @@ class HiPoNet(nn.Module):
     def forward(self, batch, mask, node_features=None):
         return self.layer(batch, mask, node_features=node_features)
 
+    def forward_with_W(self, batch, mask, node_features=None):
+        """Forward pass that also returns the diffusion matrix W.
+
+        Only supported when K=1 (``GraphFeatLearningLayer``).  Raises
+        ``NotImplementedError`` for simplicial layers.
+        """
+        if not isinstance(self.layer, GraphFeatLearningLayer):
+            raise NotImplementedError(
+                "forward_with_W is only supported for K=1 (GraphFeatLearningLayer)."
+            )
+        return self.layer.forward_with_W(batch, mask, node_features=node_features)
+
+    def forward_with_structure(self, batch, mask, node_features=None):
+        """Forward pass that also returns GW-ready structure for any K."""
+        if isinstance(self.layer, GraphFeatLearningLayer):
+            feats, W, base_mask = self.layer.forward_with_W(
+                batch, mask, node_features=node_features
+            )
+            return feats, {"type": "graph", "W": W, "mask": base_mask}
+
+        feats, simplex_ops = self.layer.forward_with_structure(
+            batch, mask, node_features=node_features
+        )
+        return feats, {"type": "simplicial", "operators": simplex_ops}
+
     def get_attention_weights(self):
         """Proxy to layer's attention weights (K>=2 only)."""
         if hasattr(self.layer, 'get_attention_weights'):
@@ -814,3 +936,154 @@ class MLPAutoEncoder(nn.Module):
 
     def forward(self, X):
         return self.decoder(self.encoder(X))
+
+
+# ---------------------------------------------------------------------------
+# Unsupervised HiPoNet autoencoder
+# ---------------------------------------------------------------------------
+
+class HiPoNetAutoencoder(nn.Module):
+    """Unsupervised autoencoder built on top of HiPoNet.
+
+    Pipeline
+    --------
+    1. **HiPoNet** computes fixed-size graph-level wavelet features
+       ``(B, wavelet_dim)`` (pooling must be enabled).
+     2. **Encoder MLP**: ``wavelet_dim → latent_dim``.
+     3. **Decoder MLP**: ``latent_dim → (max_points * point_dim)`` reshaped to
+         ``(B, max_points, point_dim)``.
+
+    Loss
+    ----
+    ``total = recon_loss  +  dist_weight * dist_loss``
+
+        * ``recon_loss`` — Masked MSE between decoded and original padded point
+            clouds.
+    * ``dist_loss``  — Stress loss: normalised pairwise Euclidean distances in
+      latent space should match normalised precomputed UDEMD distances between
+      point clouds.  Targets must be passed to ``compute_loss`` as
+      ``target_dists`` (upper-triangular vector, same order as
+      ``torch.pdist``).
+
+    Parameters
+    ----------
+    hiponet : HiPoNet
+        A *pooling-enabled* HiPoNet instance (call ``HiPoNet(..., pooling=True)``).
+    wavelet_dim : int
+        Dimensionality of the HiPoNet output (inferred at construction time via
+        a dummy forward pass, or passed explicitly).
+    latent_dim : int
+        Dimensionality of the latent embedding space.
+    hidden_dims : list[int] | None
+        Hidden layer widths for encoder/decoder MLPs. Default: ``[256, 128]``.
+    point_dim : int
+        Dimensionality of each point.
+    max_points : int
+        Maximum number of points in the padded representation.
+    dist_weight : float
+        λ for the UDEMD distance preservation term. Set to 0 to disable.
+    """
+
+    def __init__(
+        self,
+        hiponet: "HiPoNet",
+        wavelet_dim: int,
+        latent_dim: int,
+        hidden_dims: list | None = None,
+        point_dim: int = 0,
+        max_points: int = 0,
+        dist_weight: float = 0.1,
+    ):
+        super().__init__()
+        self.hiponet = hiponet
+        self.dist_weight = dist_weight
+        self.point_dim = point_dim
+        self.max_points = max_points
+
+        if self.point_dim <= 0 or self.max_points <= 0:
+            raise ValueError("point_dim and max_points must both be positive")
+
+        if hidden_dims is None:
+            hidden_dims = [256, 128]
+
+        # Encoder: wavelet_dim → latent_dim
+        enc: list[nn.Module] = []
+        in_d = wavelet_dim
+        for h in hidden_dims:
+            enc += [nn.Linear(in_d, h), nn.LayerNorm(h), nn.GELU()]
+            in_d = h
+        enc.append(nn.Linear(in_d, latent_dim))
+        self.encoder = nn.Sequential(*enc)
+
+        # Decoder: latent_dim → max_points * point_dim (mirrored)
+        dec: list[nn.Module] = []
+        in_d = latent_dim
+        for h in reversed(hidden_dims):
+            dec += [nn.Linear(in_d, h), nn.LayerNorm(h), nn.GELU()]
+            in_d = h
+        dec.append(nn.Linear(in_d, max_points * point_dim))
+        self.decoder = nn.Sequential(*dec)
+
+    def encode(self, point_clouds, mask, node_features=None):
+        """Return ``(z, feats)`` — latent codes and raw wavelet features."""
+        feats = self.hiponet(point_clouds, mask, node_features=node_features)
+        z = self.encoder(feats)
+        return z, feats
+
+    def forward(self, point_clouds, mask, node_features=None):
+        """Return ``(z, recon_points, feats)``."""
+        z, feats = self.encode(point_clouds, mask, node_features=node_features)
+        recon = self.decoder(z).view(-1, self.max_points, self.point_dim)
+        return z, recon, feats
+
+    def _dist_loss(self, z: torch.Tensor, target_dists: torch.Tensor) -> torch.Tensor:
+        """Stress loss: MSE between normalised pairwise latent distances and
+        precomputed UDEMD distances (upper-triangular vector, same order as
+        ``torch.pdist``).
+        """
+        if z.shape[0] < 2:
+            return z.new_zeros(())
+        lat_d = torch.pdist(z)  # upper-triangular pairwise Euclidean distances
+        lat_d_n = lat_d / lat_d.detach().max().clamp(min=1e-8)
+        tgt_n = target_dists / target_dists.max().clamp(min=1e-8)
+        return F.mse_loss(lat_d_n, tgt_n)
+
+    def compute_loss(
+        self,
+        point_clouds: torch.Tensor,
+        mask: torch.Tensor,
+        target_dists: torch.Tensor | None = None,
+        node_features=None,
+    ):
+        """Full unsupervised loss.
+
+        Parameters
+        ----------
+        point_clouds : (B, N, d)
+        mask         : (B, N)
+        target_dists : 1-D tensor of length B*(B-1)/2 — precomputed UDEMD
+                       distances for all pairs in the batch, in the same
+                       upper-triangular order as ``torch.pdist``.  Required
+                       when ``dist_weight > 0``.
+        node_features: optional node signals
+
+        Returns
+        -------
+        (total_loss, recon_loss, dist_loss) — scalar tensors
+        """
+        z, recon_points, _ = self(point_clouds, mask, node_features=node_features)
+
+        # Point-cloud reconstruction with padding-aware masking.
+        target_points = point_clouds[:, : self.max_points, : self.point_dim]
+        point_mask = mask[:, : self.max_points].unsqueeze(-1).float()
+        sq_err = (recon_points - target_points).pow(2)
+        denom = (point_mask.sum() * self.point_dim).clamp_min(1.0)
+        recon_loss = (sq_err * point_mask).sum() / denom
+
+        if self.dist_weight > 0.0 and target_dists is not None:
+            dist_loss = self._dist_loss(z, target_dists)
+        else:
+            dist_loss = recon_points.new_zeros(())
+
+        total = recon_loss + self.dist_weight * dist_loss
+        return total, recon_loss, dist_loss
