@@ -37,6 +37,8 @@ parser.add_argument("--model", type=str, default="graph", help="Type of structur
 parser.add_argument("--task", type=str, default="AUC")
 parser.add_argument("--num_weights", type=int, default=2, help="Number of weights")
 parser.add_argument("--fold", type=int, default=0)
+parser.add_argument("--K", type=int, default=1, help="Order of simplicial complex")
+parser.add_argument("--J", type=int, default=3, help="Number of graph wavelet scales")
 parser.add_argument(
     "--sigma", type=float, default=0.5, help="Threshold for creating the graph"
 )
@@ -69,6 +71,14 @@ else:
     args.device = "cpu"
 
 
+def make_padded_batch(pcs):
+    lengths = [pc.shape[0] for pc in pcs]
+    batch = torch.nested.as_nested_tensor(pcs, layout=torch.jagged).to_padded_tensor(0.0)
+    arange = torch.arange(batch.shape[1], device=batch.device)
+    mask = arange.unsqueeze(0) < torch.tensor(lengths, device=batch.device).unsqueeze(1)
+    return batch, mask
+
+
 def eval_roc_auc(model_spatial, model_gene, mlp, spaital_PCs, gene_PCs, labels, loader):
     model_spatial.eval()
     model_gene.eval()
@@ -76,11 +86,18 @@ def eval_roc_auc(model_spatial, model_gene, mlp, spaital_PCs, gene_PCs, labels, 
     pred = []
     with torch.no_grad():
         for idx in loader:
-            X_spatial = model_spatial(
-                [spaital_PCs[i].to(args.device) for i in idx],
-                node_features=[gene_PCs[i].to(args.device) for i in idx],
+            spatial_batch, spatial_mask = make_padded_batch(
+                [spaital_PCs[i].to(args.device) for i in idx]
             )
-            X_gene = model_gene([gene_PCs[i].to(args.device) for i in idx])
+            gene_batch, gene_mask = make_padded_batch(
+                [gene_PCs[i].to(args.device) for i in idx]
+            )
+            X_spatial = model_spatial(
+                spatial_batch,
+                spatial_mask,
+                node_features=gene_batch,
+            )
+            X_gene = model_gene(gene_batch, gene_mask)
             logits = mlp(torch.cat([X_spatial, X_gene], 1))
             preds = torch.argmax(logits, dim=1)
             pred.append(preds)
@@ -152,11 +169,18 @@ def train(model_spatial, model_gene, mlp, spaital_PCs, gene_PCs, labels):
             for idx in train_loader:
                 opt.zero_grad()
 
-                X_spatial = model_spatial(
-                    [spaital_PCs[i].to(args.device) for i in idx],
-                    node_features=[gene_PCs[i].to(args.device) for i in idx],
+                spatial_batch, spatial_mask = make_padded_batch(
+                    [spaital_PCs[i].to(args.device) for i in idx]
                 )
-                X_gene = model_gene([gene_PCs[i].to(args.device) for i in idx])
+                gene_batch, gene_mask = make_padded_batch(
+                    [gene_PCs[i].to(args.device) for i in idx]
+                )
+                X_spatial = model_spatial(
+                    spatial_batch,
+                    spatial_mask,
+                    node_features=gene_batch,
+                )
+                X_gene = model_gene(gene_batch, gene_mask)
                 logits = mlp(torch.cat([X_spatial, X_gene], 1))
                 preds.append(torch.argmax(logits, dim=1))
                 loss = loss_fn(logits, labels[idx])
@@ -203,10 +227,11 @@ if __name__ == "__main__":
     # spaital_PCs, gene_PCs, labels, num_labels = load_data_ST_melanoma(args.raw_dir)
     model_spatial = (
         HiPoNet(
-            dimension=gene_PCs[0].shape[1],
+            dimension=spaital_PCs[0].shape[1],
             n_weights=1,
             threshold=args.spatial_threshold,
             K=args.K,
+            J=args.J,
             device=args.device,
             sigma=args.sigma,
         )
@@ -219,6 +244,7 @@ if __name__ == "__main__":
             n_weights=1,
             threshold=args.gene_threshold,
             K=args.K,
+            J=args.J,
             device=args.device,
             sigma=args.sigma,
         )
@@ -226,9 +252,11 @@ if __name__ == "__main__":
         .float()
     )
     with torch.no_grad():
+        spatial_batch, spatial_mask = make_padded_batch([spaital_PCs[0][:5].to(args.device)])
+        gene_batch, gene_mask = make_padded_batch([gene_PCs[0][:5].to(args.device)])
         input_dim = (
-            model_spatial([spaital_PCs[0][:5].to(args.device)]).shape[1]
-            + model_gene([gene_PCs[0][:5].to(args.device)]).shape[1]
+            model_spatial(spatial_batch, spatial_mask, node_features=gene_batch).shape[1]
+            + model_gene(gene_batch, gene_mask).shape[1]
         )
     mlp = MLP(input_dim, args.hidden_dim, num_labels, args.num_layers).to(args.device)
     model_path = f"space_gm_model/model_{args.raw_dir}_{args.label_name}.pth"

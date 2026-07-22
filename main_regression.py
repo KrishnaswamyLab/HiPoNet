@@ -70,10 +70,12 @@ def make_persistence_dataset(PCs, labels):
 
 def collate_fn_regression(batch):
     """Pad point clouds and stack tensor labels (not scalar)."""
+    lengths = [x[0].shape[0] for x in batch]
     input_tensor = torch.nested.as_nested_tensor(
         [x[0] for x in batch], layout=torch.jagged
     ).to_padded_tensor(padding=0.0)
-    mask = input_tensor.sum(-1) != 0
+    arange = torch.arange(input_tensor.shape[1])
+    mask = arange.unsqueeze(0) < torch.tensor(lengths).unsqueeze(1)
     labels = torch.stack([x[1] for x in batch])
     return input_tensor, mask, labels
 

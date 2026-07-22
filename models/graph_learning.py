@@ -950,15 +950,13 @@ class HiPoNetAutoencoder(nn.Module):
     1. **HiPoNet** computes fixed-size graph-level wavelet features
        ``(B, wavelet_dim)`` (pooling must be enabled).
      2. **Encoder MLP**: ``wavelet_dim → latent_dim``.
-     3. **Decoder MLP**: ``latent_dim → (max_points * point_dim)`` reshaped to
-         ``(B, max_points, point_dim)``.
+     3. **Decoder MLP**: ``latent_dim → wavelet_dim``.
 
     Loss
     ----
     ``total = recon_loss  +  dist_weight * dist_loss``
 
-        * ``recon_loss`` — Masked MSE between decoded and original padded point
-            clouds.
+    * ``recon_loss`` — MSE between decoded and original HiPoNet wavelet features.
     * ``dist_loss``  — Stress loss: normalised pairwise Euclidean distances in
       latent space should match normalised precomputed UDEMD distances between
       point clouds.  Targets must be passed to ``compute_loss`` as
@@ -1015,13 +1013,13 @@ class HiPoNetAutoencoder(nn.Module):
         enc.append(nn.Linear(in_d, latent_dim))
         self.encoder = nn.Sequential(*enc)
 
-        # Decoder: latent_dim → max_points * point_dim (mirrored)
+        # Decoder: latent_dim → wavelet_dim (mirrored)
         dec: list[nn.Module] = []
         in_d = latent_dim
         for h in reversed(hidden_dims):
             dec += [nn.Linear(in_d, h), nn.LayerNorm(h), nn.GELU()]
             in_d = h
-        dec.append(nn.Linear(in_d, max_points * point_dim))
+        dec.append(nn.Linear(in_d, wavelet_dim))
         self.decoder = nn.Sequential(*dec)
 
     def encode(self, point_clouds, mask, node_features=None):
@@ -1031,9 +1029,9 @@ class HiPoNetAutoencoder(nn.Module):
         return z, feats
 
     def forward(self, point_clouds, mask, node_features=None):
-        """Return ``(z, recon_points, feats)``."""
+        """Return ``(z, recon_feats, feats)``."""
         z, feats = self.encode(point_clouds, mask, node_features=node_features)
-        recon = self.decoder(z).view(-1, self.max_points, self.point_dim)
+        recon = self.decoder(z)
         return z, recon, feats
 
     def _dist_loss(self, z: torch.Tensor, target_dists: torch.Tensor) -> torch.Tensor:
@@ -1071,19 +1069,13 @@ class HiPoNetAutoencoder(nn.Module):
         -------
         (total_loss, recon_loss, dist_loss) — scalar tensors
         """
-        z, recon_points, _ = self(point_clouds, mask, node_features=node_features)
-
-        # Point-cloud reconstruction with padding-aware masking.
-        target_points = point_clouds[:, : self.max_points, : self.point_dim]
-        point_mask = mask[:, : self.max_points].unsqueeze(-1).float()
-        sq_err = (recon_points - target_points).pow(2)
-        denom = (point_mask.sum() * self.point_dim).clamp_min(1.0)
-        recon_loss = (sq_err * point_mask).sum() / denom
+        z, recon_feats, feats = self(point_clouds, mask, node_features=node_features)
+        recon_loss = F.mse_loss(recon_feats, feats.detach())
 
         if self.dist_weight > 0.0 and target_dists is not None:
             dist_loss = self._dist_loss(z, target_dists)
         else:
-            dist_loss = recon_points.new_zeros(())
+            dist_loss = recon_feats.new_zeros(())
 
         total = recon_loss + self.dist_weight * dist_loss
         return total, recon_loss, dist_loss

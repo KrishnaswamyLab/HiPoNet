@@ -234,6 +234,7 @@ def make_collate_fn(udemd_dists: np.ndarray | None, max_points: int):
     def collate(batch):
         pcs, indices = zip(*batch)
         indices = list(indices)
+        lengths = [pc.shape[0] for pc in pcs]
 
         input_tensor = torch.nested.as_nested_tensor(
             [x if isinstance(x, torch.Tensor) else torch.tensor(x, dtype=torch.float32)
@@ -253,8 +254,10 @@ def make_collate_fn(udemd_dists: np.ndarray | None, max_points: int):
             input_tensor = torch.cat([input_tensor, pad], dim=1)
         elif cur_n > max_points:
             input_tensor = input_tensor[:, :max_points]
+            lengths = [min(length, max_points) for length in lengths]
 
-        mask = input_tensor.sum(-1) != 0
+        arange = torch.arange(input_tensor.shape[1])
+        mask = arange.unsqueeze(0) < torch.tensor(lengths).unsqueeze(1)
 
         if udemd_dists is not None:
             B = len(indices)
