@@ -9,8 +9,9 @@ dependencies = [
     "leidenalg>=0.10.2",
     "libauc>=1.4.0",
     "magic-impute>=3.0.0",
+    "matplotlib>=3.10.6",
     "numpy>=2.3.2",
-    # "phate>=1.0.11",  # Temporarily disabled - requires python3-devel for compilation
+    "phate>=2.0.0",
     "scanpy>=1.11.4",
     "scipy>=1.14.0",
     "scikit-learn>=1.7.1",
@@ -23,6 +24,5 @@ dependencies = [
 [dependency-groups]
 dev = [
     "ipykernel>=6.30.1",
-    "matplotlib>=3.10.6",
     "pytest>=8.0.0",
 ]

@@ -18,6 +18,47 @@ The script:
 3. Trains the model, logging training progress and metrics to `wandb`.
 4. Saves the best model weights for reproducibility.
 
+## Unsupervised HiPoNet Latent Space
+
+`unsupervised_main.py` trains the HiPoNet wavelet autoencoder, reloads the
+checkpoint with the best validation loss, exports one latent vector per point
+cloud population, and creates a PHATE plot.
+
+Population caches are NumPy `.npz` files with a required `populations` array.
+Each element must be a `(n_points, n_features)` array; populations may contain
+different numbers of points. Optional `labels`, `group_names`, and `group_keys`
+arrays provide plot metadata. A precomputed finite, symmetric population
+distance matrix can be supplied through `--udemd_cache`.
+
+```bash
+uv run python unsupervised_main.py \
+  --raw_dir data/populations.npz \
+  --udemd_cache data/population_distances.npy \
+  --dist_weight 0.1 \
+  --latent_dim 16 \
+  --num_epochs 120 \
+  --batch_size 8 \
+  --phate_color_by Treatment \
+  --save_dir checkpoints/hiponet_run \
+  --disable_wb
+```
+
+The run writes `best_model.pt`, `training_summary.json`,
+`latent_representations.npy`, `labels.npy`, `phate_embedding.npy`, and
+`latent_phate.png` under `--save_dir`. Use `--dist_weight 0` when no population
+distance regularizer is required.
+
+An existing latent export can also be plotted independently:
+
+```bash
+uv run python -m utils.latent_space \
+  --latents checkpoints/hiponet_run/latent_representations.npy \
+  --labels checkpoints/hiponet_run/labels.npy \
+  --population_cache data/populations.npz \
+  --color_by Treatment \
+  --output checkpoints/hiponet_run/latent_phate.png
+```
+
 ## Requirements
 
 - Python 3.7 or later

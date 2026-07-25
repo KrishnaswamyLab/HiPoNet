@@ -11,8 +11,45 @@ import pandas as pd
 import pathlib
 
 
+def load_population_cache(cache_path):
+    """Load variable-size point-cloud populations from a NumPy cache.
+
+    The cache must contain a ``populations`` array. Optional ``labels`` and
+    ``num_labels`` arrays are preserved for plotting and diagnostics.
+    """
+    cached = np.load(cache_path, allow_pickle=True)
+    if "populations" not in cached.files:
+        raise ValueError(f"Population cache {cache_path} has no 'populations' array")
+
+    populations = [np.asarray(population, dtype=np.float32) for population in cached["populations"]]
+    if not populations:
+        raise ValueError(f"Population cache {cache_path} is empty")
+    feature_dims = {population.shape[1] for population in populations if population.ndim == 2}
+    if len(feature_dims) != 1 or any(population.ndim != 2 for population in populations):
+        raise ValueError("Every cached population must be a 2-D array with the same feature dimension")
+    if any(population.shape[0] == 0 for population in populations):
+        raise ValueError("Cached populations must contain at least one point")
+
+    point_clouds = [torch.from_numpy(population) for population in populations]
+    labels = (
+        np.asarray(cached["labels"])
+        if "labels" in cached.files
+        else np.arange(len(point_clouds), dtype=np.int64)
+    )
+    if len(labels) != len(point_clouds):
+        raise ValueError("Population cache labels must match the number of populations")
+    num_labels = (
+        int(np.asarray(cached["num_labels"]).reshape(-1)[0])
+        if "num_labels" in cached.files
+        else len(np.unique(labels))
+    )
+    return point_clouds, labels, num_labels
+
+
 def load_data(raw_dir, full):
     raw_dir = raw_dir.rstrip("/")
+    if os.path.isfile(raw_dir) and raw_dir.endswith(".npz"):
+        return load_population_cache(raw_dir)
     data_name = raw_dir.split("/")[-1]
     if data_name == "melanoma_data_full":
         if full:

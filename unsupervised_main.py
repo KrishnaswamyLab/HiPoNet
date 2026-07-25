@@ -1,4 +1,5 @@
 import gc
+import json
 import os
 
 import numpy as np
@@ -41,6 +42,9 @@ parser.add_argument("--lr", type=float, default=1e-3)
 parser.add_argument("--wd", type=float, default=3e-3)
 parser.add_argument("--num_epochs", type=int, default=50)
 parser.add_argument("--batch_size", type=int, default=8)
+parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--split_seed", type=int, default=0)
+parser.add_argument("--val_fraction", type=float, default=0.2)
 parser.add_argument("--gpu", type=int, default=0)
 parser.add_argument("--disable_wb", action="store_true")
 parser.add_argument(
@@ -91,6 +95,20 @@ parser.add_argument("--sparse", action="store_true")
 parser.add_argument("--sparse_lambda", type=float, default=0.01)
 # Checkpoint
 parser.add_argument("--save_dir", type=str, default="checkpoints", help="Where to save model checkpoints")
+parser.add_argument("--skip_phate", action="store_true", help="Do not create a PHATE plot after training")
+parser.add_argument(
+    "--phate_color_by",
+    type=str,
+    default="label",
+    help="Label or population-cache metadata field used to color the PHATE plot",
+)
+parser.add_argument("--phate_knn", type=int, default=30)
+parser.add_argument(
+    "--phate_output",
+    type=str,
+    default=None,
+    help="PHATE PNG path (default: <save_dir>/latent_phate.png)",
+)
 args = parser.parse_args()
 
 if args.gpu != -1 and torch.cuda.is_available():
@@ -317,6 +335,8 @@ def run_epoch(model, loader, opt, accumulate_steps, device, train=True):
 # ---------------------------------------------------------------------------
 
 def main():
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     config = vars(args)
     config["slurm_job_id"] = os.environ.get("SLURM_JOB_ID", "local")
 
@@ -353,15 +373,29 @@ def main():
                 os.makedirs(os.path.dirname(os.path.abspath(args.udemd_cache)), exist_ok=True)
                 np.save(args.udemd_cache, udemd_dists)
                 print(f"UDEMD distances saved to {args.udemd_cache}")
+        if udemd_dists.shape != (len(PCs), len(PCs)):
+            raise ValueError(
+                f"Distance matrix shape {udemd_dists.shape} does not match {len(PCs)} populations"
+            )
+        if not np.isfinite(udemd_dists).all() or not np.allclose(udemd_dists, udemd_dists.T):
+            raise ValueError("Distance matrix must be finite and symmetric")
 
     # ------------------------------------------------------------------
     # Dataset / dataloaders
     # ------------------------------------------------------------------
     max_points = max(pc.shape[0] for pc in PCs)
     dataset = PointCloudDataset(PCs)
-    split = int(0.8 * len(dataset))
-    train_set = torch.utils.data.Subset(dataset, list(range(split)))
-    val_set   = torch.utils.data.Subset(dataset, list(range(split, len(dataset))))
+    if len(dataset) < 2:
+        raise ValueError("At least two populations are required for training")
+    if not 0.0 < args.val_fraction < 1.0:
+        raise ValueError("--val_fraction must be between 0 and 1")
+    indices = np.random.default_rng(args.split_seed).permutation(len(dataset))
+    split = int(round((1.0 - args.val_fraction) * len(dataset)))
+    split = min(max(split, 1), len(dataset) - 1)
+    train_indices = indices[:split].tolist()
+    val_indices = indices[split:].tolist()
+    train_set = torch.utils.data.Subset(dataset, train_indices)
+    val_set = torch.utils.data.Subset(dataset, val_indices)
 
     collate = make_collate_fn(udemd_dists, max_points=max_points)
 
@@ -370,6 +404,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate,
+        generator=torch.Generator().manual_seed(args.seed),
     )
     val_loader = torch.utils.data.DataLoader(
         val_set,
@@ -480,7 +515,27 @@ def main():
             )
 
     print(f"Training complete. Best val loss: {best_val_loss:.6f}")
-    print(f"Checkpoint saved to: {os.path.join(args.save_dir, 'best_model.pt')}")
+    checkpoint_path = os.path.join(args.save_dir, "best_model.pt")
+    print(f"Checkpoint saved to: {checkpoint_path}")
+
+    model.load_state_dict(torch.load(checkpoint_path, map_location=args.device, weights_only=True))
+    print("Reloaded best checkpoint for latent export.")
+    with open(os.path.join(args.save_dir, "training_summary.json"), "w") as handle:
+        json.dump(
+            {
+                "best_val_loss": best_val_loss,
+                "train_indices": train_indices,
+                "val_indices": val_indices,
+                "batch_size": args.batch_size,
+                "dist_weight": args.dist_weight,
+                "latent_dim": args.latent_dim,
+                "seed": args.seed,
+                "split_seed": args.split_seed,
+            },
+            handle,
+            indent=2,
+        )
+        handle.write("\n")
 
     # Save final latent representations for all data
     print("Computing final latent representations...")
@@ -509,6 +564,28 @@ def main():
 
     print(f"Latent representations saved to: {latent_path}")
     print(f"Labels saved to: {labels_path}")
+
+    if not args.skip_phate:
+        from utils.latent_space import categories_from_cache, plot_phate
+
+        cache_path = args.raw_dir if os.path.isfile(args.raw_dir) and args.raw_dir.endswith(".npz") else None
+        categories, category_name = categories_from_cache(
+            cache_path,
+            args.phate_color_by,
+            labels_np,
+        )
+        phate_path = args.phate_output or os.path.join(args.save_dir, "latent_phate.png")
+        embedding = plot_phate(
+            all_z,
+            categories,
+            phate_path,
+            category_name=category_name,
+            knn=args.phate_knn,
+            seed=args.seed,
+            n_jobs=int(os.environ.get("SLURM_CPUS_PER_TASK", "1")),
+        )
+        np.save(os.path.join(args.save_dir, "phate_embedding.npy"), embedding)
+        print(f"PHATE plot saved to: {phate_path}")
 
 
 if __name__ == "__main__":
