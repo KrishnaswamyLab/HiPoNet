@@ -18,6 +18,7 @@ dependencies = [
     "torchinfo>=1.8.0",
     "tqdm>=4.67.1",
     "wandb>=0.21.3",
+    "pyarrow>=25.0.0",
 ]
 
 [dependency-groups]
