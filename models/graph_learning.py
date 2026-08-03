@@ -39,137 +39,6 @@ def single_batched_compute_dist(X):
 double_batched_compute_dist = torch.vmap(torch.vmap(compute_dist))
 
 
-def normalized_population_distance_loss(
-    z: torch.Tensor,
-    target_dists: torch.Tensor,
-) -> torch.Tensor:
-    """Match relative population distances without depending on batch scale."""
-    if z.shape[0] < 3:
-        return z.new_zeros(())
-    latent_dists = torch.pdist(z)
-    if latent_dists.numel() != target_dists.numel():
-        raise ValueError(
-            f"Expected {latent_dists.numel()} target distances, got {target_dists.numel()}"
-        )
-    latent_scale = latent_dists.detach().mean().clamp_min(1e-8)
-    target_scale = target_dists.detach().mean().clamp_min(1e-8)
-    return F.smooth_l1_loss(latent_dists / latent_scale, target_dists / target_scale)
-
-
-def masked_mse_reconstruction_loss(
-    recon_points: torch.Tensor,
-    target_points: torch.Tensor,
-    mask: torch.Tensor,
-) -> torch.Tensor:
-    """Padding-aware index-wise reconstruction loss."""
-    point_mask = mask.unsqueeze(-1).float()
-    sq_err = (recon_points - target_points).pow(2)
-    denom = (point_mask.sum() * target_points.shape[-1]).clamp_min(1.0)
-    return (sq_err * point_mask).sum() / denom
-
-
-def masked_chamfer_loss(
-    recon_points: torch.Tensor,
-    target_points: torch.Tensor,
-    mask: torch.Tensor,
-) -> torch.Tensor:
-    """Symmetric squared Chamfer loss with padding masked out on targets.
-
-    The decoder emits a fixed-size point cloud, so every reconstructed point is
-    treated as active. Target padding is excluded from both nearest-neighbor
-    directions.
-    """
-    target_mask = mask.bool()
-    dists = torch.cdist(recon_points, target_points, p=2).pow(2)
-    large = torch.finfo(dists.dtype).max
-
-    recon_to_target = dists.masked_fill(~target_mask[:, None, :], large).min(dim=2).values
-    target_to_recon = dists.min(dim=1).values
-
-    valid_counts = target_mask.sum(dim=1).clamp_min(1).to(dists.dtype)
-    target_term = (target_to_recon * target_mask.to(dists.dtype)).sum(dim=1) / valid_counts
-    recon_term = recon_to_target.mean(dim=1)
-    return (recon_term + target_term).mean()
-
-
-def point_cloud_reconstruction_loss(
-    recon_points: torch.Tensor,
-    point_clouds: torch.Tensor,
-    mask: torch.Tensor,
-    max_points: int,
-    point_dim: int,
-    loss_type: str,
-) -> torch.Tensor:
-    """Compute padded point-cloud reconstruction loss."""
-    target_points = point_clouds[:, :max_points, :point_dim]
-    target_mask = mask[:, :max_points]
-    if loss_type == "mse":
-        return masked_mse_reconstruction_loss(recon_points, target_points, target_mask)
-    if loss_type == "chamfer":
-        return masked_chamfer_loss(recon_points, target_points, target_mask)
-    raise ValueError(f"Unknown reconstruction loss: {loss_type}")
-
-
-def pairwise_masked_chamfer_distances(
-    point_clouds: torch.Tensor,
-    mask: torch.Tensor,
-) -> torch.Tensor:
-    """Upper-triangular pairwise squared Chamfer distances for a batch.
-
-    The returned vector uses the same pair order as ``torch.pdist``. It is used
-    to regularize population-level geometry after decoding, so generated
-    populations keep roughly the same spread as the real populations in the
-    batch.
-    """
-    batch_size = point_clouds.shape[0]
-    if batch_size < 2:
-        return point_clouds.new_zeros((0,))
-
-    mask = mask.bool()
-    large = torch.finfo(point_clouds.dtype).max
-    distances = []
-    for i in range(batch_size - 1):
-        xi = point_clouds[i : i + 1]
-        mi = mask[i : i + 1]
-        ni = mi.sum().clamp_min(1).to(point_clouds.dtype)
-        for j in range(i + 1, batch_size):
-            xj = point_clouds[j : j + 1]
-            mj = mask[j : j + 1]
-            nj = mj.sum().clamp_min(1).to(point_clouds.dtype)
-            dists = torch.cdist(xi, xj, p=2).pow(2)
-            i_to_j = dists.masked_fill(~mj[:, None, :], large).min(dim=2).values
-            j_to_i = dists.masked_fill(~mi[:, :, None], large).min(dim=1).values
-            chamfer = (i_to_j * mi.to(dists.dtype)).sum() / ni
-            chamfer = chamfer + (j_to_i * mj.to(dists.dtype)).sum() / nj
-            distances.append(chamfer)
-    return torch.stack(distances)
-
-
-def decoded_population_distance_loss(
-    recon_points: torch.Tensor,
-    point_clouds: torch.Tensor,
-    mask: torch.Tensor,
-    max_points: int,
-    point_dim: int,
-) -> torch.Tensor:
-    """Match pairwise population distances before and after decoding."""
-    if recon_points.shape[0] < 2:
-        return recon_points.new_zeros(())
-
-    target_points = point_clouds[:, :max_points, :point_dim]
-    target_mask = mask[:, :max_points]
-    recon_mask = torch.ones(
-        recon_points.shape[:2], dtype=torch.bool, device=recon_points.device
-    )
-
-    recon_d = pairwise_masked_chamfer_distances(recon_points, recon_mask)
-    with torch.no_grad():
-        target_d = pairwise_masked_chamfer_distances(target_points, target_mask)
-        target_d = target_d / target_d.max().clamp(min=1e-8)
-    recon_d = recon_d / recon_d.detach().max().clamp(min=1e-8)
-    return F.mse_loss(recon_d, target_d)
-
-
 def compute_diffusion_from_dist(W, sigma, threshold, mask):
     W = torch.exp(-W / sigma)
     W = torch.where(W < threshold, 0.0, W)
@@ -1081,22 +950,18 @@ class HiPoNetAutoencoder(nn.Module):
     1. **HiPoNet** computes fixed-size graph-level wavelet features
        ``(B, wavelet_dim)`` (pooling must be enabled).
      2. **Encoder MLP**: ``wavelet_dim → latent_dim``.
-     3. **Decoder MLP**: ``latent_dim → (max_points * point_dim)`` reshaped to
-         ``(B, max_points, point_dim)``.
+     3. **Decoder MLP**: ``latent_dim → wavelet_dim``.
 
     Loss
     ----
-    ``total = recon_loss + dist_weight * dist_loss + decoded_dist_weight * decoded_dist_loss``
+    ``total = recon_loss  +  dist_weight * dist_loss``
 
-    * ``recon_loss`` — Masked reconstruction loss between decoded and original
-      padded point clouds.
-    * ``dist_loss`` — Stress loss: normalised pairwise Euclidean distances in
+    * ``recon_loss`` — MSE between decoded and original HiPoNet wavelet features.
+    * ``dist_loss``  — Stress loss: normalised pairwise Euclidean distances in
       latent space should match normalised precomputed UDEMD distances between
-      point clouds. Targets must be passed to ``compute_loss`` as
+      point clouds.  Targets must be passed to ``compute_loss`` as
       ``target_dists`` (upper-triangular vector, same order as
       ``torch.pdist``).
-    * ``decoded_dist_loss`` — Stress loss between pairwise decoded-population
-      Chamfer distances and pairwise real-population Chamfer distances.
 
     Parameters
     ----------
@@ -1115,8 +980,6 @@ class HiPoNetAutoencoder(nn.Module):
         Maximum number of points in the padded representation.
     dist_weight : float
         λ for the UDEMD distance preservation term. Set to 0 to disable.
-    decoded_dist_weight : float
-        λ for preserving pairwise decoded-population distances. Set to 0 to disable.
     """
 
     def __init__(
@@ -1128,16 +991,12 @@ class HiPoNetAutoencoder(nn.Module):
         point_dim: int = 0,
         max_points: int = 0,
         dist_weight: float = 0.1,
-        decoded_dist_weight: float = 0.0,
-        recon_loss_type: str = "mse",
     ):
         super().__init__()
         self.hiponet = hiponet
         self.dist_weight = dist_weight
-        self.decoded_dist_weight = decoded_dist_weight
         self.point_dim = point_dim
         self.max_points = max_points
-        self.recon_loss_type = recon_loss_type
 
         if self.point_dim <= 0 or self.max_points <= 0:
             raise ValueError("point_dim and max_points must both be positive")
@@ -1154,13 +1013,13 @@ class HiPoNetAutoencoder(nn.Module):
         enc.append(nn.Linear(in_d, latent_dim))
         self.encoder = nn.Sequential(*enc)
 
-        # Decoder: latent_dim → max_points * point_dim (mirrored)
+        # Decoder: latent_dim → wavelet_dim (mirrored)
         dec: list[nn.Module] = []
         in_d = latent_dim
         for h in reversed(hidden_dims):
             dec += [nn.Linear(in_d, h), nn.LayerNorm(h), nn.GELU()]
             in_d = h
-        dec.append(nn.Linear(in_d, max_points * point_dim))
+        dec.append(nn.Linear(in_d, wavelet_dim))
         self.decoder = nn.Sequential(*dec)
 
     def encode(self, point_clouds, mask, node_features=None):
@@ -1170,9 +1029,9 @@ class HiPoNetAutoencoder(nn.Module):
         return z, feats
 
     def forward(self, point_clouds, mask, node_features=None):
-        """Return ``(z, recon_points, feats)``."""
+        """Return ``(z, recon_feats, feats)``."""
         z, feats = self.encode(point_clouds, mask, node_features=node_features)
-        recon = self.decoder(z).view(-1, self.max_points, self.point_dim)
+        recon = self.decoder(z)
         return z, recon, feats
 
     def _dist_loss(self, z: torch.Tensor, target_dists: torch.Tensor) -> torch.Tensor:
@@ -1180,7 +1039,12 @@ class HiPoNetAutoencoder(nn.Module):
         precomputed UDEMD distances (upper-triangular vector, same order as
         ``torch.pdist``).
         """
-        return normalized_population_distance_loss(z, target_dists)
+        if z.shape[0] < 2:
+            return z.new_zeros(())
+        lat_d = torch.pdist(z)  # upper-triangular pairwise Euclidean distances
+        lat_d_n = lat_d / lat_d.detach().max().clamp(min=1e-8)
+        tgt_n = target_dists / target_dists.max().clamp(min=1e-8)
+        return F.mse_loss(lat_d_n, tgt_n)
 
     def compute_loss(
         self,
@@ -1203,145 +1067,9 @@ class HiPoNetAutoencoder(nn.Module):
 
         Returns
         -------
-        (total_loss, recon_loss, dist_loss, decoded_dist_loss, kl_loss) — scalar tensors
+        (total_loss, recon_loss, dist_loss) — scalar tensors
         """
-        z, recon_points, _ = self(point_clouds, mask, node_features=node_features)
-
-        recon_loss = point_cloud_reconstruction_loss(
-            recon_points,
-            point_clouds,
-            mask,
-            self.max_points,
-            self.point_dim,
-            self.recon_loss_type,
-        )
-
-        if self.dist_weight > 0.0 and target_dists is not None:
-            dist_loss = self._dist_loss(z, target_dists)
-        else:
-            dist_loss = recon_points.new_zeros(())
-
-        if self.decoded_dist_weight > 0.0:
-            decoded_dist_loss = decoded_population_distance_loss(
-                recon_points,
-                point_clouds,
-                mask,
-                self.max_points,
-                self.point_dim,
-            )
-        else:
-            decoded_dist_loss = recon_points.new_zeros(())
-
-        kl_loss = recon_points.new_zeros(())
-        total = (
-            recon_loss
-            + self.dist_weight * dist_loss
-            + self.decoded_dist_weight * decoded_dist_loss
-        )
-        return total, recon_loss, dist_loss, decoded_dist_loss, kl_loss
-
-
-class HiPoNetWaveletAutoencoder(nn.Module):
-    """Autoencoder that reconstructs HiPoNet wavelet features, not point clouds.
-
-    The latent representation is trained from the population-level wavelet
-    function produced by HiPoNet. A separate generation head can learn to map
-    latent codes back to cells, but its reconstruction loss is applied to
-    ``z.detach()`` so point generation does not shape the encoder.
-    """
-
-    def __init__(
-        self,
-        hiponet: "HiPoNet",
-        wavelet_dim: int,
-        latent_dim: int,
-        hidden_dims: list | None = None,
-        point_dim: int = 0,
-        max_points: int = 0,
-        dist_weight: float = 0.1,
-        generator_weight: float = 0.0,
-        recon_loss_type: str = "chamfer",
-    ):
-        super().__init__()
-        self.hiponet = hiponet
-        self.wavelet_dim = wavelet_dim
-        self.latent_dim = latent_dim
-        self.dist_weight = dist_weight
-        self.generator_weight = generator_weight
-        self.point_dim = point_dim
-        self.max_points = max_points
-        self.recon_loss_type = recon_loss_type
-
-        if self.generator_weight > 0.0 and (self.point_dim <= 0 or self.max_points <= 0):
-            raise ValueError(
-                "point_dim and max_points must be positive when generator_weight > 0"
-            )
-
-        if hidden_dims is None:
-            hidden_dims = [256, 128]
-
-        enc: list[nn.Module] = []
-        in_d = wavelet_dim
-        for h in hidden_dims:
-            enc += [nn.Linear(in_d, h), nn.LayerNorm(h), nn.GELU()]
-            in_d = h
-        enc.append(nn.Linear(in_d, latent_dim))
-        self.encoder = nn.Sequential(*enc)
-
-        wave_dec: list[nn.Module] = []
-        in_d = latent_dim
-        for h in reversed(hidden_dims):
-            wave_dec += [nn.Linear(in_d, h), nn.LayerNorm(h), nn.GELU()]
-            in_d = h
-        wave_dec.append(nn.Linear(in_d, wavelet_dim))
-        self.wavelet_decoder = nn.Sequential(*wave_dec)
-
-        self.generation_head = None
-        if self.generator_weight > 0.0:
-            gen: list[nn.Module] = []
-            in_d = latent_dim
-            for h in reversed(hidden_dims):
-                gen += [nn.Linear(in_d, h), nn.LayerNorm(h), nn.GELU()]
-                in_d = h
-            gen.append(nn.Linear(in_d, max_points * point_dim))
-            self.generation_head = nn.Sequential(*gen)
-
-    def encode(self, point_clouds, mask, node_features=None):
-        feats = self.hiponet(point_clouds, mask, node_features=node_features)
-        z = self.encoder(feats)
-        return z, feats
-
-    def reconstruct_wavelet(self, z: torch.Tensor) -> torch.Tensor:
-        return self.wavelet_decoder(z)
-
-    def generate_points(self, z: torch.Tensor) -> torch.Tensor:
-        if self.generation_head is None:
-            raise RuntimeError("Point generation head is disabled; set generator_weight > 0")
-        return self.generation_head(z).view(-1, self.max_points, self.point_dim)
-
-    def decode_latent(self, z: torch.Tensor) -> torch.Tensor:
-        return self.generate_points(z)
-
-    def forward(self, point_clouds, mask, node_features=None):
-        z, feats = self.encode(point_clouds, mask, node_features=node_features)
-        recon_feats = self.reconstruct_wavelet(z)
-        gen_points = (
-            self.generate_points(z.detach()) if self.generation_head is not None else None
-        )
-        return z, recon_feats, gen_points, feats
-
-    def _dist_loss(self, z: torch.Tensor, target_dists: torch.Tensor) -> torch.Tensor:
-        return normalized_population_distance_loss(z, target_dists)
-
-    def compute_loss(
-        self,
-        point_clouds: torch.Tensor,
-        mask: torch.Tensor,
-        target_dists: torch.Tensor | None = None,
-        node_features=None,
-    ):
-        z, feats = self.encode(point_clouds, mask, node_features=node_features)
-        recon_feats = self.reconstruct_wavelet(z)
+        z, recon_feats, feats = self(point_clouds, mask, node_features=node_features)
         recon_loss = F.mse_loss(recon_feats, feats.detach())
 
         if self.dist_weight > 0.0 and target_dists is not None:
@@ -1349,168 +1077,5 @@ class HiPoNetWaveletAutoencoder(nn.Module):
         else:
             dist_loss = recon_feats.new_zeros(())
 
-        if self.generator_weight > 0.0:
-            gen_points = self.generate_points(z.detach())
-            generator_loss = point_cloud_reconstruction_loss(
-                gen_points,
-                point_clouds,
-                mask,
-                self.max_points,
-                self.point_dim,
-                self.recon_loss_type,
-            )
-        else:
-            generator_loss = recon_feats.new_zeros(())
-
-        kl_loss = recon_feats.new_zeros(())
-        total = recon_loss + self.dist_weight * dist_loss + self.generator_weight * generator_loss
-        return total, recon_loss, dist_loss, generator_loss, kl_loss
-
-
-class HiPoNetVAE(nn.Module):
-    """Variational autoencoder built on top of HiPoNet graph-level features.
-
-    Compared with ``HiPoNetAutoencoder``, the encoder predicts a Gaussian
-    posterior ``q(z | point_cloud) = N(mu, diag(exp(logvar)))``. Training uses
-    the reparameterization trick and adds a KL penalty toward ``N(0, I)`` so
-    random latent samples can be decoded into point clouds.
-    """
-
-    def __init__(
-        self,
-        hiponet: "HiPoNet",
-        wavelet_dim: int,
-        latent_dim: int,
-        hidden_dims: list | None = None,
-        point_dim: int = 0,
-        max_points: int = 0,
-        dist_weight: float = 0.1,
-        kl_weight: float = 1.0,
-        recon_loss_type: str = "chamfer",
-    ):
-        super().__init__()
-        self.hiponet = hiponet
-        self.dist_weight = dist_weight
-        self.kl_weight = kl_weight
-        self.point_dim = point_dim
-        self.max_points = max_points
-        self.latent_dim = latent_dim
-        self.recon_loss_type = recon_loss_type
-
-        if self.point_dim <= 0 or self.max_points <= 0:
-            raise ValueError("point_dim and max_points must both be positive")
-
-        if hidden_dims is None:
-            hidden_dims = [256, 128]
-
-        enc: list[nn.Module] = []
-        in_d = wavelet_dim
-        for h in hidden_dims:
-            enc += [nn.Linear(in_d, h), nn.LayerNorm(h), nn.GELU()]
-            in_d = h
-        self.encoder = nn.Sequential(*enc)
-        self.mu_head = nn.Linear(in_d, latent_dim)
-        self.logvar_head = nn.Linear(in_d, latent_dim)
-
-        dec: list[nn.Module] = []
-        in_d = latent_dim
-        for h in reversed(hidden_dims):
-            dec += [nn.Linear(in_d, h), nn.LayerNorm(h), nn.GELU()]
-            in_d = h
-        dec.append(nn.Linear(in_d, max_points * point_dim))
-        self.decoder = nn.Sequential(*dec)
-
-    def encode_distribution(self, point_clouds, mask, node_features=None):
-        """Return ``(mu, logvar, feats)`` for q(z | point_cloud)."""
-        feats = self.hiponet(point_clouds, mask, node_features=node_features)
-        h = self.encoder(feats)
-        mu = self.mu_head(h)
-        logvar = self.logvar_head(h).clamp(min=-12.0, max=12.0)
-        return mu, logvar, feats
-
-    @staticmethod
-    def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        """Sample z = mu + eps * sigma using the reparameterization trick."""
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-
-    def encode(self, point_clouds, mask, node_features=None, sample: bool = False):
-        """Return latent codes and raw HiPoNet features.
-
-        By default this returns ``mu`` for stable embeddings. Set
-        ``sample=True`` to draw from the approximate posterior.
-        """
-        mu, logvar, feats = self.encode_distribution(
-            point_clouds, mask, node_features=node_features
-        )
-        z = self.reparameterize(mu, logvar) if sample else mu
-        return z, feats
-
-    def decode_latent(self, z: torch.Tensor) -> torch.Tensor:
-        """Decode latent vectors into padded point clouds."""
-        return self.decoder(z).view(-1, self.max_points, self.point_dim)
-
-    def sample(self, n_samples: int, device=None) -> torch.Tensor:
-        """Sample z ~ N(0, I) and decode to generated point clouds."""
-        if device is None:
-            device = next(self.parameters()).device
-        z = torch.randn(n_samples, self.latent_dim, device=device)
-        return self.decode_latent(z)
-
-    def forward(self, point_clouds, mask, node_features=None):
-        """Return ``(z, recon_points, feats)`` using posterior sampling."""
-        mu, logvar, feats = self.encode_distribution(
-            point_clouds, mask, node_features=node_features
-        )
-        z = self.reparameterize(mu, logvar)
-        recon = self.decode_latent(z)
-        return z, recon, feats
-
-    def _dist_loss(self, z: torch.Tensor, target_dists: torch.Tensor) -> torch.Tensor:
-        if z.shape[0] < 2:
-            return z.new_zeros(())
-        lat_d = torch.pdist(z)
-        lat_d_n = lat_d / lat_d.detach().max().clamp(min=1e-8)
-        tgt_n = target_dists / target_dists.max().clamp(min=1e-8)
-        return F.mse_loss(lat_d_n, tgt_n)
-
-    @staticmethod
-    def _kl_loss(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        # Mean KL per sample for q(z|x) || N(0, I).
-        kl = -0.5 * (1.0 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1)
-        return kl.mean()
-
-    def compute_loss(
-        self,
-        point_clouds: torch.Tensor,
-        mask: torch.Tensor,
-        target_dists: torch.Tensor | None = None,
-        node_features=None,
-        kl_weight: float | None = None,
-    ):
-        """Return ``(total_loss, recon_loss, dist_loss, kl_loss)``."""
-        mu, logvar, _ = self.encode_distribution(
-            point_clouds, mask, node_features=node_features
-        )
-        z = self.reparameterize(mu, logvar)
-        recon_points = self.decode_latent(z)
-
-        recon_loss = point_cloud_reconstruction_loss(
-            recon_points,
-            point_clouds,
-            mask,
-            self.max_points,
-            self.point_dim,
-            self.recon_loss_type,
-        )
-
-        if self.dist_weight > 0.0 and target_dists is not None:
-            dist_loss = self._dist_loss(mu, target_dists)
-        else:
-            dist_loss = recon_points.new_zeros(())
-
-        kl_loss = self._kl_loss(mu, logvar)
-        beta = self.kl_weight if kl_weight is None else kl_weight
-        total = recon_loss + self.dist_weight * dist_loss + beta * kl_loss
-        return total, recon_loss, dist_loss, kl_loss
+        total = recon_loss + self.dist_weight * dist_loss
+        return total, recon_loss, dist_loss
