@@ -108,15 +108,7 @@ class SimplicialWaveletTransform:
         weights = weights[non_zero_mask]
         num_edges = len(weights)
 
-        index = {}
-        for k in range(n):
-            index[frozenset([k])] = k
-        self.indices.append(index)
-        index = {}
         self.edges = torch.stack((i, j)).T
-        for k, v in enumerate(self.edges.tolist()):
-            index[frozenset(v)] = k
-        self.indices.append(index)
 
         B1 = torch.zeros((n, num_edges), device=self.adj.device)
         B1[i, torch.arange(num_edges)] = weights
@@ -125,44 +117,35 @@ class SimplicialWaveletTransform:
 
     def compute_B2(self):
         n = self.adj.shape[0]
-
-        i, j = torch.triu_indices(n, n, offset=1).to(self.device)
+        i, j = self.edges.T
         edge_weights = self.adj[i, j]
-        non_zero_mask = edge_weights > 0
-        i, j = i[non_zero_mask], j[non_zero_mask]
-        edge_weights = edge_weights[non_zero_mask]
         num_edges = len(edge_weights)
 
-        potential_triangles = torch.combinations(torch.arange(n), r=3).to(self.device)
-
-        i_t, j_t, k_t = potential_triangles.T
-
-        valid_triangles_mask = (
-            (self.adj[i_t, j_t] > 2 * self.threshold)
-            & (self.adj[j_t, k_t] > 2 * self.threshold)
-            & (self.adj[i_t, k_t] > 2 * self.threshold)
+        connected = self.adj >= self.threshold
+        common_neighbors = connected[i] & connected[j]
+        common_neighbors &= torch.arange(n, device=self.adj.device)[None, :] > j[:, None]
+        edge_rows, third_vertices = torch.where(common_neighbors)
+        self.triangles = torch.stack(
+            [i[edge_rows], j[edge_rows], third_vertices], dim=1
         )
-
-        self.triangles = potential_triangles[valid_triangles_mask].cpu().numpy()
         if len(self.triangles) > 250:
-            self.triangles = self.triangles[
-                torch.randint(0, len(self.triangles), (250,))
-            ]
+            selected = torch.randint(0, len(self.triangles), (250,), device=self.adj.device)
+            self.triangles = self.triangles[selected]
         num_triangles = self.triangles.shape[0]
-        index = {}
-        for k, v in enumerate(self.triangles.tolist()):
-            index[frozenset(v)] = k
-        self.indices.append(index)
-
         B2 = torch.zeros((num_edges, num_triangles), device=self.adj.device)
-
-        idx = np.arange(1, 3) - np.tri(3, 2, k=-1, dtype=bool)
-        for m, j in enumerate(self.triangles):
-            for k in idx:
-                B2[
-                    self.indices[1][frozenset(j[k])],
-                    self.indices[2][frozenset(j)],
-                ] = edge_weights[self.indices[1][frozenset(j[k])]]
+        if num_triangles:
+            edge_lookup = torch.full((n, n), -1, dtype=torch.long, device=self.adj.device)
+            edge_ids = torch.arange(num_edges, device=self.adj.device)
+            edge_lookup[i, j] = edge_ids
+            edge_lookup[j, i] = edge_ids
+            triangle_edges = torch.stack([
+                edge_lookup[self.triangles[:, 0], self.triangles[:, 1]],
+                edge_lookup[self.triangles[:, 0], self.triangles[:, 2]],
+                edge_lookup[self.triangles[:, 1], self.triangles[:, 2]],
+            ], dim=1)
+            columns = torch.arange(num_triangles, device=self.adj.device).repeat_interleave(3)
+            rows = triangle_edges.reshape(-1)
+            B2[rows, columns] = edge_weights[rows]
         return B2
 
     def calculate_simplex_features(self):
@@ -185,31 +168,16 @@ class SimplicialWaveletTransform:
         P_L = [None] * len(self.B)
         for i in range(len(self.B)):
             if self.B[i] is not None:
-                P_B[i] = (
-                    torch.linalg.inv(
-                        torch.diag(self.B[i].sum(axis=1))
-                        + torch.eye(self.B[i].shape[0]).to(self.device)
-                    )
-                    @ self.B[i]
-                ).to(self.device)
+                inverse_degree = (self.B[i].sum(axis=1) + 1.0).reciprocal()
+                P_B[i] = inverse_degree[:, None] * self.B[i]
         for i in range(1, len(self.B)):
             ul = self.B[i].T @ self.B[i]
-            P_L[i] = (
-                ul
-                @ torch.linalg.inv(
-                    torch.diag(ul.sum(axis=1))
-                    + torch.eye(ul.shape[0]).to(self.device)
-                )
-            ).to(self.device)
+            inverse_degree = (ul.sum(axis=1) + 1.0).reciprocal()
+            P_L[i] = ul * inverse_degree[None, :]
         for i in range(0, len(self.B) - 1):
             ll = self.B[i + 1] @ self.B[i + 1].T
-            P_U[i] = (
-                ll
-                @ torch.linalg.inv(
-                    torch.diag(ll.sum(axis=1))
-                    + torch.eye(ll.shape[0]).to(self.device)
-                )
-            ).to(self.device)
+            inverse_degree = (ll.sum(axis=1) + 1.0).reciprocal()
+            P_U[i] = ll * inverse_degree[None, :]
         return P_B, P_L, P_U
 
     def _build_geometric_transition_matrices(self, sq_diff_dists):
@@ -268,21 +236,14 @@ class SimplicialWaveletTransform:
 
         def _normalize(delta):
             d_sum = delta.sum(dim=1)
-            return delta @ torch.linalg.inv(
-                torch.diag(d_sum) + torch.eye(delta.shape[0], device=self.device)
-            )
+            return delta * (d_sum + 1.0).reciprocal()[None, :]
 
         # Boundary transition matrices (from self.B which carries alpha grad)
         P_B = [None] * len(self.B)
         for i in range(len(self.B)):
             if self.B[i] is not None:
-                P_B[i] = (
-                    torch.linalg.inv(
-                        torch.diag(self.B[i].sum(axis=1))
-                        + torch.eye(self.B[i].shape[0], device=self.device)
-                    )
-                    @ self.B[i]
-                )
+                inverse_degree = (self.B[i].sum(axis=1) + 1.0).reciprocal()
+                P_B[i] = inverse_degree[:, None] * self.B[i]
 
         P_U = [None] * len(self.B)
         P_L = [None] * len(self.B)
