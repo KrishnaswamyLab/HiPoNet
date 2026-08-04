@@ -57,6 +57,18 @@ parser.add_argument(
     action="store_true",
     help="Use the metric-aware geometric Hodge Laplacian for K >= 2",
 )
+parser.add_argument(
+    "--simplicial_max_neighbors",
+    type=int,
+    default=None,
+    help="Mutual-neighbor cap for sparse K>=2 Gaussian graph construction",
+)
+parser.add_argument(
+    "--simplicial_max_triangles",
+    type=int,
+    default=250,
+    help="Maximum number of triangles retained per point cloud and view",
+)
 parser.add_argument("--J", type=int, default=3)
 parser.add_argument("--latent_dim", type=int, default=64, help="Latent space dimensionality")
 parser.add_argument(
@@ -495,6 +507,8 @@ def main():
         use_alphas_for_connectivity_only=args.use_alphas_for_connectivity_only,
         softmax_alphas=args.softmax_alphas,
         use_geometric_laplacian=args.use_geometric_laplacian,
+        simplicial_max_neighbors=args.simplicial_max_neighbors,
+        simplicial_max_triangles=args.simplicial_max_triangles,
     ).to(args.device)
 
     # Infer wavelet feature dimension with a dummy forward pass
