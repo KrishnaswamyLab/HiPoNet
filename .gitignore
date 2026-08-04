@@ -49,3 +49,8 @@ data/**
 __pycache__
 *.h5ad
 *.pkl
+*.json
+*.npy
+*.pt
+*.err
+    
