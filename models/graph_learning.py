@@ -638,11 +638,13 @@ class SimplicialFeatLearningLayer(nn.Module):
         use_geometric_laplacian=False,
         diffusion_steps=1,
         use_attention=False,
+        max_neighbors=None,
+        max_triangles=250,
+        ignore_alphas=False,
     ):
         super().__init__()
-        self.alphas = nn.Parameter(
-            torch.rand((n_weights, dimension), requires_grad=True).to(device)
-        )
+        alpha_init = torch.ones((n_weights, dimension)) if ignore_alphas else torch.rand((n_weights, dimension))
+        self.alphas = nn.Parameter(alpha_init.to(device), requires_grad=not ignore_alphas)
         self.n_weights = n_weights
         self.dimension = dimension
         self.threshold = threshold
@@ -654,6 +656,8 @@ class SimplicialFeatLearningLayer(nn.Module):
         self.use_geometric_laplacian = use_geometric_laplacian
         self.diffusion_steps = diffusion_steps
         self.use_attention = use_attention
+        self.max_neighbors = max_neighbors
+        self.max_triangles = max_triangles
 
         if use_attention:
             self.pool_attn = nn.ModuleList(
@@ -662,13 +666,47 @@ class SimplicialFeatLearningLayer(nn.Module):
         else:
             self.pool_attn = None
 
+    def _sparsify_gaussian_graph(self, adj: torch.Tensor) -> torch.Tensor:
+        """Apply a mutual-kNN cap while retaining Gaussian edge weights."""
+        if self.max_neighbors is None or self.max_neighbors <= 0:
+            return adj
+        n = adj.shape[0]
+        if n <= 1:
+            return adj
+        k = min(self.max_neighbors, n - 1)
+        eye = torch.eye(n, dtype=torch.bool, device=adj.device)
+        scores = adj.masked_fill(eye, 0.0)
+        values, indices = torch.topk(scores, k=k, dim=1)
+        directed = torch.zeros((n, n), dtype=torch.bool, device=adj.device)
+        directed.scatter_(1, indices, values > 0)
+        keep = (directed & directed.T) | eye
+        return torch.where(keep, adj, torch.zeros_like(adj))
+
     @staticmethod
     def _normalize_operator(op: torch.Tensor | None) -> torch.Tensor | None:
         """Convert a square operator to a row-stochastic matrix for GW costs."""
+        if not torch.is_tensor(op):
+            return None
         if op is None or op.numel() == 0:
             return None
         if op.dim() != 2 or op.shape[0] != op.shape[1] or op.shape[0] < 2:
             return None
+        if op.is_sparse:
+            sym_op = (0.5 * (op + op.t())).coalesce()
+            sym_op = torch.sparse_coo_tensor(
+                sym_op.indices(),
+                sym_op.values().clamp_min(0.0),
+                sym_op.shape,
+                device=sym_op.device,
+            ).coalesce()
+            row_sum = torch.sparse.sum(sym_op, dim=1).to_dense().clamp_min(1e-8)
+            indices = sym_op.indices()
+            return torch.sparse_coo_tensor(
+                indices,
+                sym_op.values() / row_sum[indices[0]],
+                sym_op.shape,
+                device=sym_op.device,
+            ).coalesce()
         sym_op = 0.5 * (op + op.t())
         sym_op = sym_op.clamp_min(0.0)
         d = sym_op.sum(dim=1, keepdim=True).clamp_min(1e-8)
@@ -688,7 +726,10 @@ class SimplicialFeatLearningLayer(nn.Module):
         if len(swt.P_U) > 1 and swt.P_U[1] is not None:
             edge_candidates.append(swt.P_U[1])
         if edge_candidates:
-            edge_op = self._normalize_operator(sum(edge_candidates) / len(edge_candidates))
+            combined = edge_candidates[0]
+            for candidate in edge_candidates[1:]:
+                combined = combined + candidate
+            edge_op = self._normalize_operator(combined / len(edge_candidates))
             if edge_op is not None:
                 ops.append(edge_op)
 
@@ -698,7 +739,10 @@ class SimplicialFeatLearningLayer(nn.Module):
         if len(swt.P_U) > 2 and swt.P_U[2] is not None:
             tri_candidates.append(swt.P_U[2])
         if tri_candidates:
-            tri_op = self._normalize_operator(sum(tri_candidates) / len(tri_candidates))
+            combined = tri_candidates[0]
+            for candidate in tri_candidates[1:]:
+                combined = combined + candidate
+            tri_op = self._normalize_operator(combined / len(tri_candidates))
             if tri_op is not None:
                 ops.append(tri_op)
 
@@ -746,6 +790,7 @@ class SimplicialFeatLearningLayer(nn.Module):
                 D = compute_dist(X_w)
                 W = torch.exp(-D / self.sigma)
                 adj = torch.where(W >= self.threshold, W, torch.zeros_like(W))
+                adj = self._sparsify_gaussian_graph(adj)
 
                 # Compute squared diffusion distances if using geometric Laplacian.
                 # Row-normalize adj -> P, raise to diffusion_steps, then take
@@ -765,6 +810,9 @@ class SimplicialFeatLearningLayer(nn.Module):
                     self.device,
                     use_geometric_laplacian=self.use_geometric_laplacian,
                     sq_diff_dists=sq_diff_dists,
+                    max_triangles=self.max_triangles,
+                    sparse_operators=self.max_neighbors is not None,
+                    max_neighbors=self.max_neighbors,
                 )
                 coeff = swt.calculate_wavelet_coeff(self.J, pool_attn=self.pool_attn)
                 weight_features.append(coeff)
@@ -823,6 +871,8 @@ class HiPoNet(nn.Module):
         use_geometric_laplacian=False,
         diffusion_steps=1,
         use_attention=False,
+        simplicial_max_neighbors=None,
+        simplicial_max_triangles=250,
     ):
         super(HiPoNet, self).__init__()
         self.dimension = dimension
@@ -853,6 +903,9 @@ class HiPoNet(nn.Module):
                 use_geometric_laplacian=use_geometric_laplacian,
                 diffusion_steps=diffusion_steps,
                 use_attention=use_attention,
+                max_neighbors=simplicial_max_neighbors,
+                max_triangles=simplicial_max_triangles,
+                ignore_alphas=ignore_alphas,
             )
         self.device = device
         self.sigma = sigma

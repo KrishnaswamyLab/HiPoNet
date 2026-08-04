@@ -24,6 +24,7 @@ from scipy.linalg import eigh
 from models.hodge_laplacian import cayley_menger_volumes, geometric_hodge_laplacian_torch
 from models.simplicial_complex import SimplicialComplex
 from models.SWT import SimplicialWaveletTransform
+from models.graph_learning import SimplicialFeatLearningLayer, compute_dist
 
 
 # ---------------------------------------------------------------------------
@@ -339,3 +340,48 @@ class TestSWTGeometricTransition:
         # They should not be identical (geometry changes the Laplacian)
         assert not torch.allclose(c_c, c_g, atol=1e-4), \
             "Geometric and combinatorial coefficients should differ"
+
+
+class TestSparseBoundedSWT:
+    def test_sparse_geometric_operators_are_bounded(self):
+        torch.manual_seed(7)
+        points = torch.randn(48, 4, requires_grad=True)
+        layer = SimplicialFeatLearningLayer(
+            n_weights=1,
+            dimension=4,
+            threshold=0.05,
+            sigma=4.0,
+            J=2,
+            device="cpu",
+            use_geometric_laplacian=True,
+            max_neighbors=8,
+            max_triangles=20,
+        )
+        distances = compute_dist(points)
+        weights = torch.exp(-distances / layer.sigma)
+        adjacency = torch.where(
+            weights >= layer.threshold, weights, torch.zeros_like(weights)
+        )
+        adjacency = layer._sparsify_gaussian_graph(adjacency)
+        transition = adjacency / adjacency.sum(dim=1, keepdim=True).clamp_min(1e-8)
+        sq_diff_dists = compute_dist(transition)
+        swt = SimplicialWaveletTransform(
+            adjacency,
+            points,
+            threshold=layer.threshold,
+            device="cpu",
+            use_geometric_laplacian=True,
+            sq_diff_dists=sq_diff_dists,
+            max_triangles=20,
+            sparse_operators=True,
+            max_neighbors=8,
+        )
+
+        assert swt.B[1].is_sparse
+        assert swt.B[2].is_sparse
+        assert swt.edges.shape[0] <= points.shape[0] * 8 // 2
+        assert swt.triangles.shape[0] <= 20
+        assert hasattr(swt.P_L[1], "matmul")
+
+        coeff = swt.calculate_wavelet_coeff(J=2)
+        assert torch.isfinite(coeff).all()
