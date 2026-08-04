@@ -90,9 +90,8 @@ class GraphWaveletTransform(nn.Module):
         if len(P.shape) == 3:
             if X.is_nested:
                 X = X.to_padded_tensor(0.)
-            mask = (X.sum(1) != 0)
             return self.single_batch_forward(
-                P, X, mask, transpose=True
+                P, X, mask, transpose=False
             )
         else:
             return self.double_batch_forward(P, X, mask)
