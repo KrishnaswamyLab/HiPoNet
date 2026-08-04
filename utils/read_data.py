@@ -17,11 +17,29 @@ def load_population_cache(cache_path):
     The cache must contain a ``populations`` array. Optional ``labels`` and
     ``num_labels`` arrays are preserved for plotting and diagnostics.
     """
-    cached = np.load(cache_path, allow_pickle=True)
-    if "populations" not in cached.files:
-        raise ValueError(f"Population cache {cache_path} has no 'populations' array")
+    suffix = os.path.splitext(cache_path)[1].lower()
+    if suffix == ".npz":
+        cached = np.load(cache_path, allow_pickle=True)
+        if "populations" not in cached.files:
+            raise ValueError(f"Population cache {cache_path} has no 'populations' array")
+        populations_raw = cached["populations"]
+        labels_raw = cached["labels"] if "labels" in cached.files else None
+        num_labels_raw = cached["num_labels"] if "num_labels" in cached.files else None
+    elif suffix in {".pkl", ".pickle"}:
+        with open(cache_path, "rb") as handle:
+            cached = pickle.load(handle)
+        if "populations" not in cached:
+            raise ValueError(f"Population cache {cache_path} has no 'populations' entry")
+        populations_raw = cached["populations"]
+        labels_raw = cached.get("labels")
+        num_labels_raw = cached.get("num_labels")
+    else:
+        raise ValueError(
+            f"Unsupported population cache extension for {cache_path}. "
+            "Expected .npz, .pkl, or .pickle"
+        )
 
-    populations = [np.asarray(population, dtype=np.float32) for population in cached["populations"]]
+    populations = [np.asarray(population, dtype=np.float32) for population in populations_raw]
     if not populations:
         raise ValueError(f"Population cache {cache_path} is empty")
     feature_dims = {population.shape[1] for population in populations if population.ndim == 2}
@@ -31,18 +49,10 @@ def load_population_cache(cache_path):
         raise ValueError("Cached populations must contain at least one point")
 
     point_clouds = [torch.from_numpy(population) for population in populations]
-    labels = (
-        np.asarray(cached["labels"])
-        if "labels" in cached.files
-        else np.arange(len(point_clouds), dtype=np.int64)
-    )
+    labels = np.asarray(labels_raw) if labels_raw is not None else np.arange(len(point_clouds), dtype=np.int64)
     if len(labels) != len(point_clouds):
         raise ValueError("Population cache labels must match the number of populations")
-    num_labels = (
-        int(np.asarray(cached["num_labels"]).reshape(-1)[0])
-        if "num_labels" in cached.files
-        else len(np.unique(labels))
-    )
+    num_labels = int(np.asarray(num_labels_raw).reshape(-1)[0]) if num_labels_raw is not None else len(np.unique(labels))
     return point_clouds, labels, num_labels
 
 
@@ -50,7 +60,7 @@ def load_data(raw_dir, full, population_cache=None, pdo_caf_cache=None):
     raw_dir = raw_dir.rstrip("/")
     if population_cache is not None:
         return load_population_cache(population_cache)
-    if os.path.isfile(raw_dir) and raw_dir.endswith(".npz"):
+    if os.path.isfile(raw_dir) and raw_dir.lower().endswith((".npz", ".pkl", ".pickle")):
         return load_population_cache(raw_dir)
     data_name = raw_dir.split("/")[-1]
     if data_name in {"population_npz", "pdo_caf_mendeley", "pdo_caf"}:

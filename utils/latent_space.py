@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pickle
 from collections import Counter
 from pathlib import Path
 
@@ -14,6 +15,28 @@ import phate
 from matplotlib.lines import Line2D
 
 
+def load_cache_metadata(cache_path: str | Path | None):
+    """Load population-cache metadata from either NPZ or pickle."""
+    if cache_path is None:
+        return None
+
+    cache_path = Path(cache_path)
+    suffix = cache_path.suffix.lower()
+    if suffix == ".npz":
+        with np.load(cache_path, allow_pickle=True) as cached:
+            return {key: cached[key] for key in cached.files}
+    if suffix in {".pkl", ".pickle"}:
+        with open(cache_path, "rb") as handle:
+            cached = pickle.load(handle)
+        if not isinstance(cached, dict):
+            raise ValueError(f"Population cache {cache_path} must contain a dictionary")
+        return cached
+    raise ValueError(
+        f"Unsupported population cache extension for {cache_path}. "
+        "Expected .npz, .pkl, or .pickle"
+    )
+
+
 def categories_from_cache(
     cache_path: str | Path | None,
     color_by: str,
@@ -23,27 +46,27 @@ def categories_from_cache(
     if color_by.lower() == "label" or cache_path is None:
         return np.asarray(fallback_labels).astype(str), "Label"
 
-    with np.load(cache_path, allow_pickle=True) as cached:
-        if color_by in cached.files:
-            values = np.asarray(cached[color_by])
-            if values.ndim == 1 and len(values) == len(fallback_labels):
-                return values.astype(str), color_by
+    cached = load_cache_metadata(cache_path)
+    if color_by in cached:
+        values = np.asarray(cached[color_by])
+        if values.ndim == 1 and len(values) == len(fallback_labels):
+            return values.astype(str), color_by
 
-        if "group_keys" not in cached.files or "group_names" not in cached.files:
-            raise ValueError(
-                f"Cannot color by {color_by!r}: cache has no matching array or group metadata"
-            )
-        group_keys = [str(value) for value in cached["group_keys"]]
-        matches = [i for i, key in enumerate(group_keys) if key.lower() == color_by.lower()]
-        if not matches:
-            raise ValueError(f"Unknown color field {color_by!r}; available fields: {group_keys}")
-        field_index = matches[0]
-        values = []
-        for group_name in cached["group_names"]:
-            parts = str(group_name).split("__")
-            if field_index >= len(parts):
-                raise ValueError(f"Malformed group name in cache: {group_name!r}")
-            values.append(parts[field_index])
+    if "group_keys" not in cached or "group_names" not in cached:
+        raise ValueError(
+            f"Cannot color by {color_by!r}: cache has no matching array or group metadata"
+        )
+    group_keys = [str(value) for value in cached["group_keys"]]
+    matches = [i for i, key in enumerate(group_keys) if key.lower() == color_by.lower()]
+    if not matches:
+        raise ValueError(f"Unknown color field {color_by!r}; available fields: {group_keys}")
+    field_index = matches[0]
+    values = []
+    for group_name in cached["group_names"]:
+        parts = str(group_name).split("__")
+        if field_index >= len(parts):
+            raise ValueError(f"Malformed group name in cache: {group_name!r}")
+        values.append(parts[field_index])
     return np.asarray(values), group_keys[field_index]
 
 

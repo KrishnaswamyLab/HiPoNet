@@ -48,3 +48,4 @@ data/**
 .pytest_cache
 __pycache__
 *.h5ad
+*.pkl
