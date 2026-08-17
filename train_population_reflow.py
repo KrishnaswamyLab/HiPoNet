@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Train a HiPoNet-conditioned soft point-cloud decoder followed by reflow."""
+"""Train a HiPoNet soft point-cloud decoder followed by unconditional reflow."""
 
 from __future__ import annotations
 
@@ -15,19 +15,16 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 from torch import nn
 from flow_matching.path import CondOTProbPath
-from torchcfm.conditional_flow_matching import (
-    ExactOptimalTransportConditionalFlowMatcher,
-)
 
-from models.population_flow import ConditionalPopulationFlow
-from train_soft_pointcloud_corrective_flow import (
+from models.population_flow import PopulationVelocityField
+from utils.population_generation import (
     aggregate,
     distribution_loss,
     evaluation_metrics,
+    full_population_moment_loss,
     integrate_corrective_flow,
     sample_cells,
 )
-from train_variable_population_generator import full_population_moment_loss
 
 
 class SoftPointCloudMLP(nn.Module):
@@ -81,7 +78,9 @@ def summarize(rows: list[dict], method: str) -> dict[str, float]:
     result.update(
         {
             "emd": float(emd.mean()),
-            "emd_standard_deviation": float(emd.std(ddof=1)),
+            "emd_standard_deviation": float(
+                emd.std(ddof=1) if len(emd) > 1 else 0.0
+            ),
             "emd_median": float(np.median(emd)),
         }
     )
@@ -125,26 +124,7 @@ def structured_slot_noise(
     return torch.cat((slots, random), dim=2)
 
 
-def torchcfm_conditional_flow(
-    matcher: ExactOptimalTransportConditionalFlowMatcher,
-    source: torch.Tensor,
-    target: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Apply TorchCFM's default stochastic exact-OT matcher per population."""
-    times, paths, velocities = [], [], []
-    for source_cloud, target_cloud in zip(source, target):
-        # TorchCFM samples (x_0, x_1) from its exact minibatch OT plan, then
-        # constructs x_t = (1 - t) x_0 + t x_1 and u_t = x_1 - x_0.
-        time, path, velocity = matcher.sample_location_and_conditional_flow(
-            source_cloud, target_cloud
-        )
-        times.append(time[:, None])
-        paths.append(path)
-        velocities.append(velocity)
-    return torch.stack(times), torch.stack(paths), torch.stack(velocities)
-
-
-def original_conditional_flow(
+def sample_flow_path(
     probability_path: CondOTProbPath,
     source: torch.Tensor,
     target: torch.Tensor,
@@ -167,11 +147,6 @@ def main() -> None:
     parser.add_argument("--population_cache", type=Path, required=True)
     parser.add_argument("--latents", type=Path, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
-    parser.add_argument(
-        "--flow_matcher_backend",
-        choices=("torchcfm", "flow_matching"),
-        default="torchcfm",
-    )
     parser.add_argument("--validation_patient", default="75")
     parser.add_argument("--test_patient", default="99")
     parser.add_argument("--decoder_steps", type=int, default=5000)
@@ -358,9 +333,8 @@ def main() -> None:
     for parameter in decoder.parameters():
         parameter.requires_grad_(False)
 
-    flow = ConditionalPopulationFlow(
+    flow = PopulationVelocityField(
         cell_dim=cell_dim,
-        latent_dim=latent_dim,
         hidden_dim=args.hidden_dim,
         n_blocks=args.n_blocks,
     ).to(device)
@@ -372,8 +346,7 @@ def main() -> None:
     flow_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         flow_optimizer, T_max=args.flow_steps
     )
-    torchcfm_matcher = ExactOptimalTransportConditionalFlowMatcher(sigma=0.0)
-    original_probability_path = CondOTProbPath()
+    probability_path = CondOTProbPath()
 
     def flow_validation() -> float:
         flow.eval()
@@ -383,9 +356,7 @@ def main() -> None:
                 stop = start + 8
                 latent = validation_latent[start:stop]
                 source = decoder(latent, validation_noise[start:stop])
-                corrected = integrate_corrective_flow(
-                    flow, source, latent, args.integration_steps
-                )
+                corrected = integrate_corrective_flow(flow, source, args.integration_steps)
                 value, _ = distribution_loss(
                     corrected, validation_target[start:stop], projection_tensor,
                     0.25, 0.25, 0.25, 0.20,
@@ -419,19 +390,9 @@ def main() -> None:
                     batch_size, n_points, args.noise_dim, args.slot_dim, device
                 ),
             )
-        if args.flow_matcher_backend == "torchcfm":
-            time, path, target_velocity = torchcfm_conditional_flow(
-                torchcfm_matcher, source, real
-            )
-        else:
-            time, path, target_velocity = original_conditional_flow(
-                original_probability_path, source, real
-            )
-        condition = latent[:, None].expand(-1, n_points, -1)
-        predicted_velocity = flow(
-            path.flatten(0, 1), time.flatten(), condition.flatten(0, 1)
-        ).view_as(path)
-        # Flow-matching objective: E[||v_theta(x_t, t, z) - u_t||_2^2].
+        time, path, target_velocity = sample_flow_path(probability_path, source, real)
+        predicted_velocity = flow(path.flatten(0, 1), time.flatten()).view_as(path)
+        # Flow-matching objective: E[||v_theta(x_t, t) - u_t||_2^2].
         flow_matching = F.mse_loss(predicted_velocity, target_velocity)
         loss = flow_matching
         flow_optimizer.zero_grad(set_to_none=True)
@@ -486,12 +447,10 @@ def main() -> None:
                     1, n_cells, args.noise_dim, args.slot_dim, device
                 ),
             )
-            corrected = integrate_corrective_flow(
-                flow, source, latent, args.integration_steps
-            )
+            corrected = integrate_corrective_flow(flow, source, args.integration_steps)
             generated = {
                 "soft_pointcloud_mlp": from_model(source[0].cpu().numpy()),
-                "conditional_reflow": from_model(corrected[0].cpu().numpy()),
+                "unconditional_reflow": from_model(corrected[0].cpu().numpy()),
                 "real_vs_real": sample_cells(target, n_cells, eval_rng),
             }
             for method, prediction in generated.items():
@@ -516,25 +475,17 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    methods = ("soft_pointcloud_mlp", "conditional_reflow", "real_vs_real")
+    methods = ("soft_pointcloud_mlp", "unconditional_reflow", "real_vs_real")
     method_summaries = {method: summarize(rows, method) for method in methods}
     summary = {
-        "method": "SCULPT-inspired soft MLP plus z-conditioned flow matching",
-        "flow_matcher_backend": args.flow_matcher_backend,
+        "method": "HiPoNet-conditioned soft MLP plus unconditional flow matching",
+        "flow_matching_implementation": "Meta flow_matching 1.0.10",
         "training_pairing": (
-            "TorchCFM default stochastic sampling from exact minibatch OT plan"
-            if args.flow_matcher_backend == "torchcfm"
-            else "independent within-population pairing supplied to Meta CondOTProbPath"
+            "independent within-population pairing supplied to Meta CondOTProbPath"
         ),
-        "torchcfm_version": "1.0.7",
-        "flow_matching_version": "1.0.10",
-        "cfm_path": (
-            "TorchCFM sigma=0 linear OT-CFM path"
-            if args.flow_matcher_backend == "torchcfm"
-            else "Meta flow_matching CondOTProbPath"
-        ),
-        "flow_objective": "pure conditional flow-matching MSE; no auxiliary terms",
-        "flow_conditioning": "x_t, t, and HiPoNet population latent z",
+        "cfm_path": "Meta flow_matching CondOTProbPath",
+        "flow_objective": "pure flow-matching MSE; no auxiliary terms",
+        "flow_conditioning": "x_t and t only; z conditions only the soft decoder",
         "cell_dim": cell_dim,
         "latent_dim": latent_dim,
         "noise_dim": args.noise_dim,

@@ -17,7 +17,6 @@ dependencies = [
     "scipy>=1.14.0",
     "scikit-learn>=1.7.1",
     "torch>=2.8.0",
-    "torchcfm>=1.0.7",
     "torchinfo>=1.8.0",
     "tqdm>=4.67.1",
     "wandb>=0.21.3",
