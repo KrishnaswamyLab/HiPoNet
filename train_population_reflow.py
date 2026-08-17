@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 from torch import nn
+from flow_matching.path import CondOTProbPath
 from torchcfm.conditional_flow_matching import (
     ExactOptimalTransportConditionalFlowMatcher,
 )
@@ -143,11 +144,34 @@ def torchcfm_conditional_flow(
     return torch.stack(times), torch.stack(paths), torch.stack(velocities)
 
 
+def original_conditional_flow(
+    probability_path: CondOTProbPath,
+    source: torch.Tensor,
+    target: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Apply Meta's original conditional OT probability path per population."""
+    times, paths, velocities = [], [], []
+    for source_cloud, target_cloud in zip(source, target):
+        time = torch.rand(len(source_cloud), device=source.device)
+        path_sample = probability_path.sample(
+            x_0=source_cloud, x_1=target_cloud, t=time
+        )
+        times.append(path_sample.t[:, None])
+        paths.append(path_sample.x_t)
+        velocities.append(path_sample.dx_t)
+    return torch.stack(times), torch.stack(paths), torch.stack(velocities)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--population_cache", type=Path, required=True)
     parser.add_argument("--latents", type=Path, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
+    parser.add_argument(
+        "--flow_matcher_backend",
+        choices=("torchcfm", "flow_matching"),
+        default="torchcfm",
+    )
     parser.add_argument("--validation_patient", default="75")
     parser.add_argument("--test_patient", default="99")
     parser.add_argument("--decoder_steps", type=int, default=5000)
@@ -348,7 +372,8 @@ def main() -> None:
     flow_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         flow_optimizer, T_max=args.flow_steps
     )
-    flow_matcher = ExactOptimalTransportConditionalFlowMatcher(sigma=0.0)
+    torchcfm_matcher = ExactOptimalTransportConditionalFlowMatcher(sigma=0.0)
+    original_probability_path = CondOTProbPath()
 
     def flow_validation() -> float:
         flow.eval()
@@ -394,10 +419,14 @@ def main() -> None:
                     batch_size, n_points, args.noise_dim, args.slot_dim, device
                 ),
             )
-        time, path, target_velocity = torchcfm_conditional_flow(
-            flow_matcher,
-            source, real
-        )
+        if args.flow_matcher_backend == "torchcfm":
+            time, path, target_velocity = torchcfm_conditional_flow(
+                torchcfm_matcher, source, real
+            )
+        else:
+            time, path, target_velocity = original_conditional_flow(
+                original_probability_path, source, real
+            )
         condition = latent[:, None].expand(-1, n_points, -1)
         predicted_velocity = flow(
             path.flatten(0, 1), time.flatten(), condition.flatten(0, 1)
@@ -488,11 +517,22 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(rows)
     methods = ("soft_pointcloud_mlp", "conditional_reflow", "real_vs_real")
+    method_summaries = {method: summarize(rows, method) for method in methods}
     summary = {
-        "method": "SCULPT-inspired soft MLP plus z-conditioned TorchCFM exact OT-CFM",
-        "training_pairing": "TorchCFM default stochastic sampling from exact minibatch OT plan",
+        "method": "SCULPT-inspired soft MLP plus z-conditioned flow matching",
+        "flow_matcher_backend": args.flow_matcher_backend,
+        "training_pairing": (
+            "TorchCFM default stochastic sampling from exact minibatch OT plan"
+            if args.flow_matcher_backend == "torchcfm"
+            else "independent within-population pairing supplied to Meta CondOTProbPath"
+        ),
         "torchcfm_version": "1.0.7",
-        "cfm_path": "TorchCFM sigma=0 linear OT-CFM path",
+        "flow_matching_version": "1.0.10",
+        "cfm_path": (
+            "TorchCFM sigma=0 linear OT-CFM path"
+            if args.flow_matcher_backend == "torchcfm"
+            else "Meta flow_matching CondOTProbPath"
+        ),
         "flow_objective": "pure conditional flow-matching MSE; no auxiliary terms",
         "flow_conditioning": "x_t, t, and HiPoNet population latent z",
         "cell_dim": cell_dim,
@@ -503,15 +543,28 @@ def main() -> None:
         "training_point_choices": list(point_choices),
         "validation_populations": int(len(validation_ids)),
         "test_populations": int(len(selected_test)),
+        "correlation_definition": (
+            "PCC and SCC across the 44 marker means of each generated/real population"
+        ),
         "best_decoder_step": best_decoder_step,
         "best_decoder_validation": best_decoder_validation,
         "best_flow_step": best_flow_step,
         "baseline_decoder_validation": baseline_flow_validation,
         "best_flow_validation": best_flow_validation,
         "flow_improved": best_flow_step > 0,
-        "distribution_metrics": {
-            method: summarize(rows, method) for method in methods
+        "held_out_test_statistics": {
+            method: {
+                metric: {
+                    "mean": method_summaries[method][metric],
+                    "standard_deviation": method_summaries[method][
+                        f"{metric}_standard_deviation"
+                    ],
+                }
+                for metric in ("chamfer", "emd", "pcc", "scc")
+            }
+            for method in methods
         },
+        "distribution_metrics": method_summaries,
     }
     torch.save(
         {

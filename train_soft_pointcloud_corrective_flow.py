@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
+from scipy.stats import pearsonr, spearmanr
 from torch import nn
 
 from models.population_flow import ConditionalPopulationFlow, sample_population
@@ -196,8 +197,19 @@ def evaluation_metrics(
 ) -> dict[str, float]:
     prediction_diversity = float(np.mean(cdist(prediction, prediction)))
     target_diversity = float(np.mean(cdist(target, target)))
+    prediction_profile = prediction.mean(0)
+    target_profile = target.mean(0)
+    if prediction_profile.std() == 0 or target_profile.std() == 0:
+        pcc = scc = 0.0
+    else:
+        pcc = float(pearsonr(prediction_profile, target_profile).statistic)
+        scc = float(spearmanr(prediction_profile, target_profile).statistic)
+        pcc = pcc if np.isfinite(pcc) else 0.0
+        scc = scc if np.isfinite(scc) else 0.0
     return {
         "chamfer": chamfer(prediction, target),
+        "pcc": pcc,
+        "scc": scc,
         "sliced_wasserstein": sliced_wasserstein_metric(
             prediction, target, projections
         ),
@@ -227,6 +239,8 @@ def evaluation_metrics(
 def aggregate(rows: list[dict]) -> dict[str, float]:
     keys = [
         "chamfer",
+        "pcc",
+        "scc",
         "sliced_wasserstein",
         "marker_mean_rmse",
         "marker_std_rmse",
@@ -235,7 +249,14 @@ def aggregate(rows: list[dict]) -> dict[str, float]:
         "target_diversity",
         "diversity_ratio",
     ]
-    return {key: float(np.mean([row[key] for row in rows])) for key in keys}
+    result = {}
+    for key in keys:
+        values = np.asarray([row[key] for row in rows], dtype=np.float64)
+        result[key] = float(values.mean())
+        result[f"{key}_standard_deviation"] = float(
+            values.std(ddof=1) if len(values) > 1 else 0.0
+        )
+    return result
 
 
 def main() -> None:

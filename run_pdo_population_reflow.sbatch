@@ -1,22 +1,24 @@
 #!/bin/bash
-#SBATCH --job-name=pdo_torchcfm
+#SBATCH --job-name=pdo_flow_match
 #SBATCH --partition=gpu,scavenge_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --time=08:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=40G
-#SBATCH --output=./logs/slurm/pdo_torchcfm_%j.out
-#SBATCH --error=./logs/slurm/pdo_torchcfm_%j.err
+#SBATCH --output=./logs/slurm/pdo_flow_match_%j.out
+#SBATCH --error=./logs/slurm/pdo_flow_match_%j.err
 
 set -euo pipefail
 cd /nfs/roberts/project/pi_sk2433/edc26/HiPoNet
 mkdir -p logs/slurm
 PY=/nfs/roberts/project/pi_sk2433/edc26/.venv/bin/python
+FLOW_MATCHER_BACKEND=${FLOW_MATCHER_BACKEND:-torchcfm}
 
 "$PY" train_population_reflow.py \
   --population_cache data/pdo_2m/populations_allcells_features44_n1678.npz \
   --latents checkpoints/legacy_gwt_k1_20260812/pdo2m/ld32_K1/train/latent_representations.npy \
-  --output_dir checkpoints/pdo_sculpt_torchcfm_20260817 \
+  --output_dir "checkpoints/pdo_sculpt_${FLOW_MATCHER_BACKEND}_20260817" \
+  --flow_matcher_backend "$FLOW_MATCHER_BACKEND" \
   --validation_patient 75 --test_patient 99 \
   --decoder_steps 5000 --flow_steps 4000 \
   --training_points 128,256,512 --cell_budget 1024 \
