@@ -14,6 +14,9 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 from torch import nn
+from torchcfm.conditional_flow_matching import (
+    ExactOptimalTransportConditionalFlowMatcher,
+)
 
 from models.population_flow import ConditionalPopulationFlow
 from train_soft_pointcloud_corrective_flow import (
@@ -121,28 +124,23 @@ def structured_slot_noise(
     return torch.cat((slots, random), dim=2)
 
 
-def exact_ot_targets(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Deterministically pair equal-size clouds using TorchCFM's exact OT variant."""
-    paired = []
+def torchcfm_conditional_flow(
+    matcher: ExactOptimalTransportConditionalFlowMatcher,
+    source: torch.Tensor,
+    target: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Apply TorchCFM's default stochastic exact-OT matcher per population."""
+    times, paths, velocities = [], [], []
     for source_cloud, target_cloud in zip(source, target):
-        cost = torch.cdist(source_cloud.detach(), target_cloud.detach()).square()
-        _, target_indices = linear_sum_assignment(cost.cpu().numpy())
-        indices = torch.as_tensor(target_indices, device=target.device)
-        paired.append(target_cloud[indices])
-    return torch.stack(paired)
-
-
-def exact_ot_conditional_flow(
-    source: torch.Tensor, target: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Construct the sigma=0 OT-CFM path and conditional vector field."""
-    paired_target = exact_ot_targets(source, target)
-    time = torch.rand(*source.shape[:2], 1, device=source.device)
-    # OT-CFM path: x_t = (1 - t) x_0 + t x_1.
-    path = (1.0 - time) * source + time * paired_target
-    # Target velocity equation: u_t(x_1 | x_0) = x_1 - x_0.
-    velocity = paired_target - source
-    return time, path, velocity, paired_target
+        # TorchCFM samples (x_0, x_1) from its exact minibatch OT plan, then
+        # constructs x_t = (1 - t) x_0 + t x_1 and u_t = x_1 - x_0.
+        time, path, velocity = matcher.sample_location_and_conditional_flow(
+            source_cloud, target_cloud
+        )
+        times.append(time[:, None])
+        paths.append(path)
+        velocities.append(velocity)
+    return torch.stack(times), torch.stack(paths), torch.stack(velocities)
 
 
 def main() -> None:
@@ -164,7 +162,6 @@ def main() -> None:
     parser.add_argument("--flow_learning_rate", type=float, default=5e-5)
     parser.add_argument("--full_cloud_every", type=int, default=25)
     parser.add_argument("--full_cloud_weight", type=float, default=0.05)
-    parser.add_argument("--paired_decoder_weight", type=float, default=0.0)
     parser.add_argument("--eval_every", type=int, default=200)
     parser.add_argument("--patience", type=int, default=1600)
     parser.add_argument("--integration_steps", type=int, default=32)
@@ -179,6 +176,7 @@ def main() -> None:
     point_choices = tuple(int(value) for value in args.training_points.split(","))
 
     rng = np.random.default_rng(args.seed)
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
@@ -291,12 +289,6 @@ def main() -> None:
         loss, components = distribution_loss(
             soft, real, projection_tensor, 0.25, 0.25, 0.25, 0.20
         )
-        paired_decoder = loss.new_zeros(())
-        if args.paired_decoder_weight > 0:
-            with torch.no_grad():
-                decoder_target = exact_ot_targets(soft, real)
-            paired_decoder = F.mse_loss(soft, decoder_target)
-            loss = loss + args.paired_decoder_weight * paired_decoder
         full_moments = loss.new_zeros(())
         if args.full_cloud_every > 0 and step % args.full_cloud_every == 0:
             full_index = int(rng.choice(selected))
@@ -320,7 +312,6 @@ def main() -> None:
                 "training_points": n_points,
                 "batch_populations": batch_size,
                 "training_total": float(loss.detach()),
-                "paired_decoder": float(paired_decoder.detach()),
                 "full_cloud_moments": float(full_moments.detach()),
                 **{key: float(value.detach()) for key, value in components.items()},
                 "validation_distribution": score,
@@ -357,6 +348,7 @@ def main() -> None:
     flow_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         flow_optimizer, T_max=args.flow_steps
     )
+    flow_matcher = ExactOptimalTransportConditionalFlowMatcher(sigma=0.0)
 
     def flow_validation() -> float:
         flow.eval()
@@ -402,7 +394,8 @@ def main() -> None:
                     batch_size, n_points, args.noise_dim, args.slot_dim, device
                 ),
             )
-        time, path, target_velocity, _ = exact_ot_conditional_flow(
+        time, path, target_velocity = torchcfm_conditional_flow(
+            flow_matcher,
             source, real
         )
         condition = latent[:, None].expand(-1, n_points, -1)
@@ -496,9 +489,10 @@ def main() -> None:
         writer.writerows(rows)
     methods = ("soft_pointcloud_mlp", "conditional_reflow", "real_vs_real")
     summary = {
-        "method": "SCULPT-inspired z-conditioned soft MLP plus z-conditioned exact OT-CFM",
-        "training_pairing": "deterministic exact minibatch OT assignment; no PCA ordering",
-        "cfm_path": "sigma=0 linear OT-CFM path",
+        "method": "SCULPT-inspired soft MLP plus z-conditioned TorchCFM exact OT-CFM",
+        "training_pairing": "TorchCFM default stochastic sampling from exact minibatch OT plan",
+        "torchcfm_version": "1.0.7",
+        "cfm_path": "TorchCFM sigma=0 linear OT-CFM path",
         "flow_objective": "pure conditional flow-matching MSE; no auxiliary terms",
         "flow_conditioning": "x_t, t, and HiPoNet population latent z",
         "cell_dim": cell_dim,
