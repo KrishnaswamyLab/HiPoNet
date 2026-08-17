@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import os
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -10,8 +12,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import phate
 from matplotlib.lines import Line2D
+
+try:
+    import phate
+except ModuleNotFoundError:
+    vendor_paths = glob.glob(
+        str(Path(__file__).resolve().parents[1] / ".vendor/phate-env/lib/python*/site-packages")
+    )
+    if not vendor_paths:
+        raise
+    sys.path.insert(0, vendor_paths[0])
+    import phate
 
 
 def categories_from_cache(

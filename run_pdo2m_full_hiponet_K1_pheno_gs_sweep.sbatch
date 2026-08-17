@@ -32,6 +32,6 @@ mkdir -p "$TRAIN"
   --sigma 32 --threshold 0.1 --ignore_alphas \
   --dist_weight 0.1 --udemd_cache "$DIST" \
   --split_cache "$CACHE" --split_field Patient --val_group 75 --test_group 99 \
-  --seed 1302 --split_seed 1302 --disable_wb --save_dir "$TRAIN"
+  --seed 1302 --split_seed 1302 --disable_wb --skip_phate --save_dir "$TRAIN"
 
 "$PY" -c "import numpy as np; z=np.load('$TRAIN/latent_representations.npy'); assert z.shape==(1678,$LD) and np.isfinite(z).all(); print('validated full latent export',z.shape)"
