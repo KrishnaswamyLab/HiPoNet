@@ -89,6 +89,7 @@ def compute_diffusion_matrix(
     if use_alphas_for_connectivity_only and alphas is not None:
         # Instead of X_bar, just add the n_weights dimension and use the point clouds
         return W, point_clouds.unsqueeze(1).expand(-1, alphas.shape[0], -1, -1)
+
     return W, X_bar
 
 

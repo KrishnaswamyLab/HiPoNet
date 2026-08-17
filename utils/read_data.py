@@ -11,8 +11,65 @@ import pandas as pd
 import pathlib
 
 
+def _safe_standardize_cloud(arr):
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+
+    if arr.shape[0] <= 1:
+        return arr.copy()
+
+    mean = arr.mean(axis=0, keepdims=True)
+    std = arr.std(axis=0, ddof=0, keepdims=True)
+    std = np.where(std < 1e-8, 1.0, std)
+    return (arr - mean) / std
+
+
+def _load_custom_pointcloud_pickle(path):
+    with open(path, "rb") as handle:
+        payload = pickle.load(handle)
+
+    if isinstance(payload, dict):
+        if "clouds" not in payload:
+            raise ValueError("Custom point-cloud pickle must contain a 'clouds' entry")
+        clouds = payload["clouds"]
+        labels = payload.get("labels")
+    else:
+        clouds = payload
+        labels = None
+
+    if labels is None:
+        raise ValueError("Custom point-cloud pickle must contain a 'labels' entry")
+
+    PCs = []
+    for pc in clouds:
+        standardized = _safe_standardize_cloud(pc)
+        PCs.append(torch.tensor(standardized, dtype=torch.float))
+
+    labels_array = np.asarray(labels)
+    le = LabelEncoder()
+    encoded_labels = le.fit_transform(labels_array)
+    num_labels = len(np.unique(encoded_labels))
+    return PCs, encoded_labels, num_labels
+
+
 def load_data(raw_dir, full):
     raw_dir = raw_dir.rstrip("/")
+    raw_path = pathlib.Path(raw_dir)
+
+    if raw_path.is_file() and raw_path.suffix == ".pkl":
+        return _load_custom_pointcloud_pickle(raw_path)
+
+    if raw_path.is_dir():
+        candidate_files = [
+            raw_path / "ddr_pointclouds.pkl",
+            raw_path / "point_clouds.pkl",
+            raw_path / "pc.pkl",
+        ]
+        for candidate in candidate_files:
+            if candidate.is_file():
+                return _load_custom_pointcloud_pickle(candidate)
+
     data_name = raw_dir.split("/")[-1]
     if data_name == "melanoma_data_full":
         if full:

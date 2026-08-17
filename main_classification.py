@@ -29,9 +29,9 @@ parser.add_argument("--full", action="store_true")
 parser.add_argument("--task", type=str, default="prolif", help="Task on PDO data")
 parser.add_argument("--num_weights", type=int, default=2, help="Number of weights")
 parser.add_argument(
-    "--threshold", type=float, default=0.5, help="Threshold for creating the graph"
+    "--threshold", type=float, default=0.001, help="Threshold for creating the graph"
 )
-parser.add_argument("--sigma", type=float, default=0.5, help="Bandwidth")
+parser.add_argument("--sigma", type=float, default=2.0, help="Bandwidth")
 parser.add_argument("--K", type=int, default=1, help="Order of simplicial complex")
 parser.add_argument("--J", type=int, default=3, help="Number of wavelet scales")
 parser.add_argument(
@@ -41,7 +41,7 @@ parser.add_argument("--num_layers", type=int, default=3, help="Number of MLP lay
 parser.add_argument("--lr", type=float, default=0.01, help="Learning Rate")
 parser.add_argument("--wd", type=float, default=3e-3, help="Weight decay")
 parser.add_argument("--num_epochs", type=int, default=20, help="Number of epochs")
-parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
+parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
 parser.add_argument("--gpu", type=int, default=0, help="GPU index")
 parser.add_argument("--disable_wb", action="store_true", help="Disable wandb logging")
 parser.add_argument(
@@ -109,6 +109,13 @@ def test(model, mlp, loader):
     return (correct * 100) / total
 
 
+def _assert_finite(name, tensor, context):
+    if tensor is None:
+        return
+    if not torch.isfinite(tensor).all().item():
+        raise RuntimeError(f"{name} became non-finite during {context}: {tensor}")
+
+
 def train(model, mlp, PCs, labels):
     print(args)
     opt = torch.optim.AdamW(
@@ -150,12 +157,16 @@ def train(model, mlp, PCs, labels):
             minibatches_per_batch = args.n_accumulate
             for i, (batch, mask, labels) in enumerate(train_loader, start=1):
                 batch, mask = batch.to(args.device), mask.to(args.device)
+                _assert_finite("batch", batch, f"batch {i}")
                 X = model(batch, mask)
+                _assert_finite("model features", X, f"forward pass batch {i}")
                 logits = mlp(X)
+                _assert_finite("logits", logits, f"MLP batch {i}")
                 labels = labels.to(logits.device)
                 preds = torch.argmax(logits, dim=1)
                 correct_train += torch.sum(preds == labels).detach().float().item()
                 loss = loss_fn(logits, labels)
+                _assert_finite("loss", loss, f"loss batch {i}")
                 if args.orthogonal:
                     alphas = model.layer.alphas
                     loss += (
