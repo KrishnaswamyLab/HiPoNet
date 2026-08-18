@@ -21,47 +21,39 @@ from utils.population_generation import (
     aggregate,
     distribution_loss,
     evaluation_metrics,
-    full_population_moment_loss,
     integrate_corrective_flow,
     sample_cells,
 )
 
 
 class SoftPointCloudMLP(nn.Module):
-    """Decode concat(z, epsilon) with one cell-population coupling layer."""
+    """Decode a latent and deterministic slot coordinates to a soft point cloud."""
 
     def __init__(
-        self, latent_dim: int, noise_dim: int, cell_dim: int, hidden_dim: int
+        self, latent_dim: int, slot_dim: int, cell_dim: int, hidden_dim: int
     ) -> None:
         super().__init__()
-        self.noise_dim = noise_dim
+        self.slot_dim = slot_dim
         self.cell_features = nn.Sequential(
-            nn.Linear(latent_dim + noise_dim, hidden_dim),
+            nn.Linear(latent_dim + slot_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
         )
-        self.population_context = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim), nn.SiLU()
-        )
         self.coupling = nn.Sequential(
-            nn.Linear(2 * hidden_dim + latent_dim, hidden_dim),
+            nn.Linear(hidden_dim + latent_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
         self.output = nn.Sequential(nn.SiLU(), nn.Linear(hidden_dim, cell_dim))
 
-    def forward(self, latent: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
-        n_points = noise.shape[1]
+    def forward(self, latent: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
+        n_points = slots.shape[1]
         expanded_latent = latent[:, None].expand(-1, n_points, -1)
-        cells = self.cell_features(torch.cat((expanded_latent, noise), dim=2))
-        context = self.population_context(cells.mean(1))
-        context = context[:, None].expand(-1, n_points, -1)
-        coupled = self.coupling(
-            torch.cat((cells, context, expanded_latent), dim=2)
-        )
+        cells = self.cell_features(torch.cat((expanded_latent, slots), dim=2))
+        coupled = self.coupling(torch.cat((cells, expanded_latent), dim=2))
         return self.output(cells + coupled)
 
 
@@ -104,24 +96,15 @@ def canonical_slot_features(
     return torch.stack(features[:slot_dim], dim=1)
 
 
-def structured_slot_noise(
+def canonical_slot_batch(
     batch_size: int,
     n_points: int,
-    noise_dim: int,
     slot_dim: int,
     device: torch.device,
-    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """Combine deterministic rank features with optional stochastic cell features."""
+    """Repeat deterministic canonical slot features for a population batch."""
     slots = canonical_slot_features(n_points, slot_dim, device)
-    slots = slots[None].expand(batch_size, -1, -1)
-    random_dim = noise_dim - slot_dim
-    if random_dim == 0:
-        return slots
-    random = torch.randn(
-        batch_size, n_points, random_dim, device=device, generator=generator
-    )
-    return torch.cat((slots, random), dim=2)
+    return slots[None].expand(batch_size, -1, -1)
 
 
 def sample_flow_path(
@@ -151,16 +134,11 @@ def main() -> None:
     parser.add_argument("--test_patient", default="99")
     parser.add_argument("--decoder_steps", type=int, default=5000)
     parser.add_argument("--flow_steps", type=int, default=4000)
-    parser.add_argument("--training_points", default="128,256,512")
-    parser.add_argument("--cell_budget", type=int, default=1024)
-    parser.add_argument("--noise_dim", type=int, default=64)
     parser.add_argument("--slot_dim", type=int, default=16)
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--n_blocks", type=int, default=4)
     parser.add_argument("--decoder_learning_rate", type=float, default=3e-4)
     parser.add_argument("--flow_learning_rate", type=float, default=5e-5)
-    parser.add_argument("--full_cloud_every", type=int, default=25)
-    parser.add_argument("--full_cloud_weight", type=float, default=0.05)
     parser.add_argument("--eval_every", type=int, default=200)
     parser.add_argument("--patience", type=int, default=1600)
     parser.add_argument("--integration_steps", type=int, default=32)
@@ -169,10 +147,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1830)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
-    if not 1 <= args.slot_dim <= args.noise_dim:
-        parser.error("--slot_dim must be between 1 and --noise_dim")
+    if args.slot_dim < 1:
+        parser.error("--slot_dim must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    point_choices = tuple(int(value) for value in args.training_points.split(","))
 
     rng = np.random.default_rng(args.seed)
     np.random.seed(args.seed)
@@ -185,6 +162,11 @@ def main() -> None:
     populations = [np.asarray(value, dtype=np.float32) for value in cache["populations"]]
     names = [str(value) for value in cache["group_names"]]
     latents = np.asarray(np.load(args.latents), dtype=np.float32)
+    if len(latents) != len(populations):
+        raise ValueError(
+            "Population/latent count mismatch: "
+            f"{len(populations)} populations but {len(latents)} latent vectors"
+        )
     patients = np.asarray([name.split("__", 1)[0] for name in names])
     validation_ids = np.flatnonzero(patients == str(args.validation_patient))
     test_ids = np.flatnonzero(patients == str(args.test_patient))
@@ -217,31 +199,13 @@ def main() -> None:
     def from_model(values: np.ndarray) -> np.ndarray:
         return (values * cell_std + cell_mean).astype(np.float32)
 
-    def population_sample(
-        index: int, n_points: int, local_rng: np.random.Generator
-    ) -> np.ndarray:
-        return to_model(sample_cells(populations[index], n_points, local_rng))
-
     projection_rng = np.random.default_rng(args.seed + 2)
     projections = projection_rng.normal(size=(32, cell_dim)).astype(np.float32)
     projections /= np.linalg.norm(projections, axis=1, keepdims=True)
     projection_tensor = torch.from_numpy(projections).to(device)
 
-    validation_rng = np.random.default_rng(args.seed + 3)
-    validation_target = torch.from_numpy(
-        np.stack(
-            [population_sample(int(index), 128, validation_rng) for index in validation_ids]
-        )
-    ).to(device)
-    validation_latent = latent_tensor[torch.from_numpy(validation_ids).to(device)]
-    validation_generator = torch.Generator(device=device).manual_seed(args.seed + 4)
-    validation_noise = structured_slot_noise(
-        len(validation_ids), 128, args.noise_dim, args.slot_dim,
-        device, validation_generator,
-    )
-
     decoder = SoftPointCloudMLP(
-        latent_dim, args.noise_dim, cell_dim, args.hidden_dim
+        latent_dim, args.slot_dim, cell_dim, args.hidden_dim
     ).to(device)
     decoder_optimizer = torch.optim.AdamW(
         decoder.parameters(), lr=args.decoder_learning_rate, weight_decay=1e-5
@@ -254,50 +218,37 @@ def main() -> None:
         decoder.eval()
         values = []
         with torch.no_grad():
-            for start in range(0, len(validation_ids), 8):
-                stop = start + 8
-                generated = decoder(
-                    validation_latent[start:stop], validation_noise[start:stop]
+            for population_id in validation_ids:
+                population_id = int(population_id)
+                target = torch.from_numpy(to_model(populations[population_id])).to(
+                    device
+                )[None]
+                latent = latent_tensor[population_id][None]
+                slots = canonical_slot_batch(
+                    1, target.shape[1], args.slot_dim, device
                 )
+                generated = decoder(latent, slots)
                 value, _ = distribution_loss(
-                    generated, validation_target[start:stop], projection_tensor,
+                    generated, target, projection_tensor,
                     0.25, 0.25, 0.25, 0.20,
                 )
-                values.append((float(value), len(generated)))
+                values.append(float(value))
         decoder.train()
-        return sum(value * count for value, count in values) / sum(count for _, count in values)
+        return float(np.mean(values))
 
     decoder_history = []
     best_decoder_validation = float("inf")
     best_decoder_step = 0
     best_decoder_state = None
     for step in range(1, args.decoder_steps + 1):
-        n_points = int(rng.choice(point_choices))
-        batch_size = max(1, args.cell_budget // n_points)
-        selected = rng.choice(train_ids, size=batch_size, replace=False)
-        selected_tensor = torch.from_numpy(selected).to(device)
-        real = torch.from_numpy(
-            np.stack(
-                [population_sample(int(index), n_points, rng) for index in selected]
-            )
-        ).to(device)
-        noise = structured_slot_noise(
-            batch_size, n_points, args.noise_dim, args.slot_dim, device
-        )
-        soft = decoder(latent_tensor[selected_tensor], noise)
+        population_id = int(rng.choice(train_ids))
+        real = torch.from_numpy(to_model(populations[population_id])).to(device)[None]
+        n_points = real.shape[1]
+        slots = canonical_slot_batch(1, n_points, args.slot_dim, device)
+        soft = decoder(latent_tensor[population_id][None], slots)
         loss, components = distribution_loss(
             soft, real, projection_tensor, 0.25, 0.25, 0.25, 0.20
         )
-        full_moments = loss.new_zeros(())
-        if args.full_cloud_every > 0 and step % args.full_cloud_every == 0:
-            full_index = int(rng.choice(selected))
-            full_target = torch.from_numpy(to_model(populations[full_index])).to(device)
-            full_noise = structured_slot_noise(
-                1, len(full_target), args.noise_dim, args.slot_dim, device
-            )
-            full_prediction = decoder(latent_tensor[full_index][None], full_noise)[0]
-            full_moments = full_population_moment_loss(full_prediction, full_target)
-            loss = loss + args.full_cloud_weight * full_moments
         decoder_optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(decoder.parameters(), 5.0)
@@ -308,10 +259,10 @@ def main() -> None:
             score = decoder_validation()
             row = {
                 "step": step,
-                "training_points": n_points,
-                "batch_populations": batch_size,
+                "training_cells": n_points,
+                "population_id": population_id,
+                "batch_populations": 1,
                 "training_total": float(loss.detach()),
-                "full_cloud_moments": float(full_moments.detach()),
                 **{key: float(value.detach()) for key, value in components.items()},
                 "validation_distribution": score,
             }
@@ -352,18 +303,24 @@ def main() -> None:
         flow.eval()
         values = []
         with torch.no_grad():
-            for start in range(0, len(validation_ids), 8):
-                stop = start + 8
-                latent = validation_latent[start:stop]
-                source = decoder(latent, validation_noise[start:stop])
+            for population_id in validation_ids:
+                population_id = int(population_id)
+                target = torch.from_numpy(to_model(populations[population_id])).to(
+                    device
+                )[None]
+                latent = latent_tensor[population_id][None]
+                slots = canonical_slot_batch(
+                    1, target.shape[1], args.slot_dim, device
+                )
+                source = decoder(latent, slots)
                 corrected = integrate_corrective_flow(flow, source, args.integration_steps)
                 value, _ = distribution_loss(
-                    corrected, validation_target[start:stop], projection_tensor,
+                    corrected, target, projection_tensor,
                     0.25, 0.25, 0.25, 0.20,
                 )
-                values.append((float(value), len(corrected)))
+                values.append(float(value))
         flow.train()
-        return sum(value * count for value, count in values) / sum(count for _, count in values)
+        return float(np.mean(values))
 
     baseline_flow_validation = flow_validation()
     best_flow_validation = baseline_flow_validation
@@ -373,22 +330,14 @@ def main() -> None:
     }
     flow_history = []
     for step in range(1, args.flow_steps + 1):
-        n_points = int(rng.choice(point_choices))
-        batch_size = max(1, args.cell_budget // n_points)
-        selected = rng.choice(train_ids, size=batch_size, replace=False)
-        selected_tensor = torch.from_numpy(selected).to(device)
-        latent = latent_tensor[selected_tensor]
-        real = torch.from_numpy(
-            np.stack(
-                [population_sample(int(index), n_points, rng) for index in selected]
-            )
-        ).to(device)
+        population_id = int(rng.choice(train_ids))
+        latent = latent_tensor[population_id][None]
+        real = torch.from_numpy(to_model(populations[population_id])).to(device)[None]
+        n_points = real.shape[1]
         with torch.no_grad():
             source = decoder(
                 latent,
-                structured_slot_noise(
-                    batch_size, n_points, args.noise_dim, args.slot_dim, device
-                ),
+                canonical_slot_batch(1, n_points, args.slot_dim, device),
             )
         time, path, target_velocity = sample_flow_path(probability_path, source, real)
         predicted_velocity = flow(path.flatten(0, 1), time.flatten()).view_as(path)
@@ -405,8 +354,9 @@ def main() -> None:
             score = flow_validation()
             row = {
                 "step": step,
-                "training_points": n_points,
-                "batch_populations": batch_size,
+                "training_cells": n_points,
+                "population_id": population_id,
+                "batch_populations": 1,
                 "training_total": float(loss.detach()),
                 "flow_matching": float(flow_matching.detach()),
                 "baseline_decoder_validation": baseline_flow_validation,
@@ -443,9 +393,7 @@ def main() -> None:
             latent = latent_tensor[int(population_id)][None]
             source = decoder(
                 latent,
-                structured_slot_noise(
-                    1, n_cells, args.noise_dim, args.slot_dim, device
-                ),
+                canonical_slot_batch(1, n_cells, args.slot_dim, device),
             )
             corrected = integrate_corrective_flow(flow, source, args.integration_steps)
             generated = {
@@ -488,10 +436,12 @@ def main() -> None:
         "flow_conditioning": "x_t and t only; z conditions only the soft decoder",
         "cell_dim": cell_dim,
         "latent_dim": latent_dim,
-        "noise_dim": args.noise_dim,
+        "decoder_input": "z and deterministic canonical Fourier slots; no noise",
+        "decoder_architecture": "pointwise MLP with no population context aggregation",
         "slot_dim": args.slot_dim,
         "generation_count_source": "target_population_count",
-        "training_point_choices": list(point_choices),
+        "training_cell_count_source": "all cells in the selected training population",
+        "validation_cell_count_source": "all cells in each validation population",
         "validation_populations": int(len(validation_ids)),
         "test_populations": int(len(selected_test)),
         "correlation_definition": (

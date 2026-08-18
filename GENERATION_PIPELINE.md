@@ -6,8 +6,10 @@ does not predict cell count.
 
 `train_population_reflow.py` implements the complete generation experiment:
 
-1. A soft point-cloud MLP maps the HiPoNet latent `z`, canonical slot features,
-   and residual noise to an initial population.
+1. A deterministic soft point-cloud MLP maps the HiPoNet latent `z` and
+   canonical Fourier slot features to an initial population. It receives no
+   random noise and performs no population-level context aggregation; each
+   output cell is computed independently from `z` and its slot.
 2. Meta's `flow_matching` package constructs the linear conditional probability
    path between independently paired source and target cells within each
    population.
@@ -16,6 +18,13 @@ does not predict cell count.
 4. Heun integration transports the soft population from `t=0` to `t=1`.
 5. Held-out evaluation reports mean and sample standard deviation for Chamfer,
    exact uniform-mass EMD, PCC, and SCC.
+
+Decoder and flow checkpoint selection evaluate every cell in each validation
+population. Variable-sized populations are processed one at a time.
+
+Training also uses every cell in the selected population. Each optimization
+step processes one variable-sized population and computes dense Sinkhorn,
+sliced Wasserstein, moment, and diversity losses on its complete cloud.
 
 The implementation is intentionally small:
 
@@ -27,3 +36,10 @@ The implementation is intentionally small:
 The batch script expects the PDO population cache and HiPoNet latent
 representations to exist on Bouchet. Large data and checkpoint artifacts are
 not stored in this repository.
+
+For the CAF-inclusive experiment, `prepare_pdo_caf_sampled512.sbatch` builds
+3,347 populations containing both PDO cells and cancer-associated fibroblasts
+across all 45 markers. `run_pdo_caf_population_reflow.sbatch` trains the same
+decoder and reflow model with patients 75 and 99 held out. This configuration
+uses at most 512 real cells per population because dense Sinkhorn storage is
+quadratic in population size; it is distinct from the full-cell PDO run.
