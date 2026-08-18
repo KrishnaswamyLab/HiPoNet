@@ -11,56 +11,6 @@ from scipy.stats import pearsonr, spearmanr
 
 from models.population_flow import PopulationVelocityField
 
-
-def covariance(values: torch.Tensor) -> torch.Tensor:
-    centered = values - values.mean(0, keepdim=True)
-    return centered.T @ centered / max(len(values) - 1, 1)
-
-
-def population_losses(
-    prediction: torch.Tensor, reference: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    moment = (
-        F.mse_loss(prediction.mean(0), reference.mean(0))
-        + F.mse_loss(prediction.std(0), reference.std(0))
-        + 0.1 * F.mse_loss(covariance(prediction), covariance(reference))
-    )
-    prediction_distances = torch.pdist(prediction)
-    reference_distances = torch.pdist(reference)
-    diversity = F.mse_loss(
-        prediction_distances.mean(), reference_distances.mean()
-    ) + F.mse_loss(prediction_distances.std(), reference_distances.std())
-    return moment, diversity
-
-
-def sinkhorn_cost(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    epsilon: float = 0.2,
-    iterations: int = 20,
-) -> torch.Tensor:
-    cost = torch.cdist(x, y).square()
-    cost = cost / cost.detach().median().clamp_min(1e-4)
-    log_kernel = -cost / epsilon
-    log_a = x.new_full((len(x),), -np.log(len(x)))
-    log_b = y.new_full((len(y),), -np.log(len(y)))
-    log_u = torch.zeros_like(log_a)
-    log_v = torch.zeros_like(log_b)
-    for _ in range(iterations):
-        log_u = log_a - torch.logsumexp(log_kernel + log_v[None, :], dim=1)
-        log_v = log_b - torch.logsumexp(log_kernel + log_u[:, None], dim=0)
-    plan = torch.exp(log_u[:, None] + log_kernel + log_v[None, :])
-    return (plan * cost).sum()
-
-
-def sinkhorn_divergence(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return (
-        sinkhorn_cost(x, y)
-        - 0.5 * sinkhorn_cost(x, x)
-        - 0.5 * sinkhorn_cost(y, y)
-    ).clamp_min(0.0)
-
-
 def emd_point_cloud_loss(
     prediction: torch.Tensor,
     reference: torch.Tensor,
@@ -92,47 +42,6 @@ def emd_point_cloud_loss(
         emd_values.append(value)
     emd = torch.stack(emd_values).mean()
     return emd, {"emd": emd}
-
-
-def sliced_wasserstein_loss(
-    prediction: torch.Tensor,
-    reference: torch.Tensor,
-    projections: torch.Tensor,
-) -> torch.Tensor:
-    prediction_projected = torch.sort(prediction @ projections.T, dim=0).values
-    reference_projected = torch.sort(reference @ projections.T, dim=0).values
-    return F.mse_loss(prediction_projected, reference_projected)
-
-
-def distribution_loss(
-    prediction: torch.Tensor,
-    reference: torch.Tensor,
-    projections: torch.Tensor,
-    sinkhorn_weight: float,
-    swd_weight: float,
-    moment_weight: float,
-    diversity_weight: float,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    sinkhorn_values, swd_values, moment_values, diversity_values = [], [], [], []
-    for generated, real in zip(prediction, reference):
-        sinkhorn_values.append(sinkhorn_divergence(generated, real))
-        swd_values.append(sliced_wasserstein_loss(generated, real, projections))
-        moment, diversity = population_losses(generated, real)
-        moment_values.append(moment)
-        diversity_values.append(diversity)
-    components = {
-        "sinkhorn": torch.stack(sinkhorn_values).mean(),
-        "swd": torch.stack(swd_values).mean(),
-        "moments": torch.stack(moment_values).mean(),
-        "diversity": torch.stack(diversity_values).mean(),
-    }
-    total = (
-        sinkhorn_weight * components["sinkhorn"]
-        + swd_weight * components["swd"]
-        + moment_weight * components["moments"]
-        + diversity_weight * components["diversity"]
-    )
-    return total, components
 
 
 def sample_cells(
