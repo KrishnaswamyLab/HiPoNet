@@ -19,10 +19,10 @@ from flow_matching.path import CondOTProbPath
 from models.population_flow import PopulationVelocityField
 from utils.population_generation import (
     aggregate,
+    emd_point_cloud_loss,
     evaluation_metrics,
     integrate_corrective_flow,
     sample_cells,
-    soft_point_cloud_loss,
 )
 
 
@@ -125,8 +125,11 @@ def main() -> None:
     parser.add_argument("--n_blocks", type=int, default=4)
     parser.add_argument("--decoder_learning_rate", type=float, default=3e-4)
     parser.add_argument("--flow_learning_rate", type=float, default=5e-5)
-    parser.add_argument("--cloud_loss_weight", type=float, default=1.0)
-    parser.add_argument("--moment_loss_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--emd_solver", choices=("exact", "sinkhorn_log"), default="sinkhorn_log"
+    )
+    parser.add_argument("--emd_regularization", type=float, default=0.2)
+    parser.add_argument("--emd_iterations", type=int, default=100)
     parser.add_argument("--eval_every", type=int, default=200)
     parser.add_argument("--patience", type=int, default=1600)
     parser.add_argument("--integration_steps", type=int, default=32)
@@ -218,11 +221,12 @@ def main() -> None:
                 latent = latent_tensor[population_id][None]
                 noise = fixed_noise(population_id, target.shape[1], 10_000)
                 generated = decoder(latent, noise)
-                value, _ = soft_point_cloud_loss(
+                value, _ = emd_point_cloud_loss(
                     generated,
                     target,
-                    args.cloud_loss_weight,
-                    args.moment_loss_weight,
+                    args.emd_solver,
+                    args.emd_regularization,
+                    args.emd_iterations,
                 )
                 values.append(float(value))
         decoder.train()
@@ -238,11 +242,12 @@ def main() -> None:
         n_points = real.shape[1]
         noise = sample_decoder_noise(1, n_points, args.noise_dim, device)
         soft = decoder(latent_tensor[population_id][None], noise)
-        loss, components = soft_point_cloud_loss(
+        loss, components = emd_point_cloud_loss(
             soft,
             real,
-            args.cloud_loss_weight,
-            args.moment_loss_weight,
+            args.emd_solver,
+            args.emd_regularization,
+            args.emd_iterations,
         )
         decoder_optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -307,11 +312,12 @@ def main() -> None:
                 noise = fixed_noise(population_id, target.shape[1], 20_000)
                 source = decoder(latent, noise)
                 corrected = integrate_corrective_flow(flow, source, args.integration_steps)
-                value, _ = soft_point_cloud_loss(
+                value, _ = emd_point_cloud_loss(
                     corrected,
                     target,
-                    args.cloud_loss_weight,
-                    args.moment_loss_weight,
+                    args.emd_solver,
+                    args.emd_regularization,
+                    args.emd_iterations,
                 )
                 values.append(float(value))
         flow.train()
@@ -432,13 +438,16 @@ def main() -> None:
             "phenogs": (
                 "trained in the HiPoNet encoder checkpoint; latent z is frozen here"
             ),
-            "soft_point_cloud": "Sinkhorn divergence between soft and real clouds",
+            "soft_point_cloud": "POT EMD between soft and real clouds",
             "flow_matching": "velocity-field MSE",
-            "moments": "marker mean, standard deviation, and covariance matching",
         },
-        "soft_decoder_objective": (
-            f"{args.cloud_loss_weight} * Sinkhorn point-cloud loss + "
-            f"{args.moment_loss_weight} * moments loss"
+        "soft_decoder_objective": "POT EMD only; no moments or auxiliary terms",
+        "pot_emd_solver": args.emd_solver,
+        "pot_emd_regularization": (
+            args.emd_regularization if args.emd_solver == "sinkhorn_log" else None
+        ),
+        "pot_emd_iterations": (
+            args.emd_iterations if args.emd_solver == "sinkhorn_log" else None
         ),
         "flow_conditioning": "x_t and t only; z conditions only the soft decoder",
         "cell_dim": cell_dim,

@@ -1,26 +1,35 @@
 import torch
 
-from utils.population_generation import soft_point_cloud_loss
+from utils.population_generation import emd_point_cloud_loss
 
 
-def test_soft_point_cloud_loss_has_only_requested_components() -> None:
+def test_emd_point_cloud_loss_is_the_only_decoder_component() -> None:
     target = torch.randn(1, 12, 5)
     prediction = target.clone().requires_grad_(True)
-    loss, components = soft_point_cloud_loss(prediction, target)
+    loss, components = emd_point_cloud_loss(prediction, target, solver="exact")
 
-    assert set(components) == {"point_cloud", "moments"}
+    assert set(components) == {"emd"}
+    assert torch.equal(loss, components["emd"])
     assert torch.isfinite(loss)
-    assert float(loss.detach()) < 1e-5
+    assert float(loss.detach()) < 1e-3
     loss.backward()
     assert prediction.grad is not None
 
 
-def test_soft_point_cloud_loss_respects_weights() -> None:
-    prediction = torch.randn(1, 10, 4)
-    target = torch.randn(1, 10, 4)
-    loss, components = soft_point_cloud_loss(
-        prediction, target, cloud_weight=2.0, moment_weight=3.0
+def test_pot_sinkhorn_emd_supports_gradients_and_unequal_clouds() -> None:
+    prediction = torch.randn(1, 7, 5, requires_grad=True)
+    target = torch.randn(1, 9, 5)
+
+    loss, components = emd_point_cloud_loss(
+        prediction,
+        target,
+        solver="sinkhorn_log",
+        regularization=0.2,
+        iterations=30,
     )
 
-    expected = 2.0 * components["point_cloud"] + 3.0 * components["moments"]
-    assert torch.allclose(loss, expected)
+    assert torch.equal(loss, components["emd"])
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()

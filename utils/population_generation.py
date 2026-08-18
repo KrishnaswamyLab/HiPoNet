@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import ot
 import torch
 import torch.nn.functional as F
 from scipy.spatial.distance import cdist
@@ -60,26 +61,37 @@ def sinkhorn_divergence(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     ).clamp_min(0.0)
 
 
-def soft_point_cloud_loss(
+def emd_point_cloud_loss(
     prediction: torch.Tensor,
     reference: torch.Tensor,
-    cloud_weight: float = 1.0,
-    moment_weight: float = 1.0,
+    solver: str = "sinkhorn_log",
+    regularization: float = 0.2,
+    iterations: int = 100,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Sinkhorn cloud fidelity plus population moments for the soft decoder."""
-    cloud_values, moment_values = [], []
+    """Differentiable POT EMD for the soft decoder."""
+    if solver not in {"exact", "sinkhorn_log"}:
+        raise ValueError(f"Unknown POT EMD solver: {solver}")
+    emd_values = []
     for generated, real in zip(prediction, reference):
-        cloud_values.append(sinkhorn_divergence(generated, real))
-        moment_values.append(full_population_moment_loss(generated, real))
-    components = {
-        "point_cloud": torch.stack(cloud_values).mean(),
-        "moments": torch.stack(moment_values).mean(),
-    }
-    total = (
-        cloud_weight * components["point_cloud"]
-        + moment_weight * components["moments"]
-    )
-    return total, components
+        generated_weights = ot.unif(len(generated), type_as=generated)
+        real_weights = ot.unif(len(real), type_as=real)
+        cost = ot.dist(generated, real, metric="euclidean")
+        if solver == "exact":
+            value = ot.emd2(generated_weights, real_weights, cost)
+        else:
+            value = ot.sinkhorn2(
+                generated_weights,
+                real_weights,
+                cost,
+                reg=regularization,
+                method="sinkhorn_log",
+                numItermax=iterations,
+                stopThr=1e-6,
+                warn=False,
+            )
+        emd_values.append(value)
+    emd = torch.stack(emd_values).mean()
+    return emd, {"emd": emd}
 
 
 def sliced_wasserstein_loss(
@@ -121,16 +133,6 @@ def distribution_loss(
         + diversity_weight * components["diversity"]
     )
     return total, components
-
-
-def full_population_moment_loss(
-    prediction: torch.Tensor, reference: torch.Tensor
-) -> torch.Tensor:
-    return (
-        F.mse_loss(prediction.mean(0), reference.mean(0))
-        + F.mse_loss(prediction.std(0, unbiased=False), reference.std(0, unbiased=False))
-        + 0.1 * F.mse_loss(covariance(prediction), covariance(reference))
-    )
 
 
 def sample_cells(
