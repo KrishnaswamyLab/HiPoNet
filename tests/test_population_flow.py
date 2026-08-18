@@ -3,7 +3,7 @@ import inspect
 import torch
 
 from models.population_flow import PopulationVelocityField
-from train_population_reflow import SoftPointCloudMLP, canonical_slot_batch
+from train_population_reflow import SoftMLPDecoder, sample_decoder_noise
 from utils.population_generation import integrate_corrective_flow
 
 
@@ -28,14 +28,19 @@ def test_corrective_flow_preserves_population_shape():
     assert corrected.shape == source.shape
 
 
-def test_soft_decoder_is_deterministic_without_noise():
-    model = SoftPointCloudMLP(
-        latent_dim=4, slot_dim=6, cell_dim=5, hidden_dim=16
+def test_soft_decoder_maps_latent_and_noise_to_variable_size_cloud():
+    model = SoftMLPDecoder(
+        latent_dim=4, noise_dim=6, cell_dim=5, hidden_dim=16
     )
     latent = torch.randn(2, 4)
-    slots = canonical_slot_batch(2, 7, 6, torch.device("cpu"))
-    first = model(latent, slots)
-    second = model(latent, slots)
+    noise = sample_decoder_noise(2, 7, 6, torch.device("cpu"))
+    first = model(latent, noise)
+    second = model(latent, noise)
     assert first.shape == (2, 7, 5)
     assert torch.equal(first, second)
+    assert not torch.equal(
+        first,
+        model(latent, sample_decoder_noise(2, 7, 6, torch.device("cpu"))),
+    )
     assert not hasattr(model, "population_context")
+    assert not hasattr(model, "coupling")

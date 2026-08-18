@@ -19,7 +19,7 @@ PY=/nfs/roberts/project/pi_sk2433/edc26/.venv/bin/python
   --output_dir checkpoints/pdo_full_population_sinkhorn_no_context_reflow_20260817 \
   --validation_patient 75 --test_patient 99 \
   --decoder_steps 5000 --flow_steps 4000 \
-  --slot_dim 16 --hidden_dim 256 --n_blocks 4 \
+  --noise_dim 16 --hidden_dim 256 --n_blocks 4 \
   --decoder_learning_rate 3e-4 --flow_learning_rate 5e-5 \
   --eval_every 200 --patience 1600 --integration_steps 32 \
   --metric_points 256 --eval_populations 0 --seed 1830 --device cuda

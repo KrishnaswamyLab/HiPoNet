@@ -6,10 +6,10 @@ does not predict cell count.
 
 `train_population_reflow.py` implements the complete generation experiment:
 
-1. A deterministic soft point-cloud MLP maps the HiPoNet latent `z` and
-   canonical Fourier slot features to an initial population. It receives no
-   random noise and performs no population-level context aggregation; each
-   output cell is computed independently from `z` and its slot.
+1. `SoftMLPDecoder` concatenates the HiPoNet population latent `z` with
+   per-cell Gaussian noise and passes each `[z, epsilon_i]` vector through one
+   sequential MLP. The resulting rows form the initial `N x g` soft point
+   cloud. There are no Fourier slots, context aggregation, or coupling layers.
 2. Meta's `flow_matching` package constructs the linear conditional probability
    path between independently paired source and target cells within each
    population.
