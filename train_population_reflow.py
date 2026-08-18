@@ -19,10 +19,10 @@ from flow_matching.path import CondOTProbPath
 from models.population_flow import PopulationVelocityField
 from utils.population_generation import (
     aggregate,
-    distribution_loss,
     evaluation_metrics,
     integrate_corrective_flow,
     sample_cells,
+    soft_point_cloud_loss,
 )
 
 
@@ -125,6 +125,8 @@ def main() -> None:
     parser.add_argument("--n_blocks", type=int, default=4)
     parser.add_argument("--decoder_learning_rate", type=float, default=3e-4)
     parser.add_argument("--flow_learning_rate", type=float, default=5e-5)
+    parser.add_argument("--cloud_loss_weight", type=float, default=1.0)
+    parser.add_argument("--moment_loss_weight", type=float, default=1.0)
     parser.add_argument("--eval_every", type=int, default=200)
     parser.add_argument("--patience", type=int, default=1600)
     parser.add_argument("--integration_steps", type=int, default=32)
@@ -186,9 +188,6 @@ def main() -> None:
         return (values * cell_std + cell_mean).astype(np.float32)
 
     projection_rng = np.random.default_rng(args.seed + 2)
-    projections = projection_rng.normal(size=(32, cell_dim)).astype(np.float32)
-    projections /= np.linalg.norm(projections, axis=1, keepdims=True)
-    projection_tensor = torch.from_numpy(projections).to(device)
 
     decoder = SoftMLPDecoder(
         latent_dim, args.noise_dim, cell_dim, args.hidden_dim
@@ -219,9 +218,11 @@ def main() -> None:
                 latent = latent_tensor[population_id][None]
                 noise = fixed_noise(population_id, target.shape[1], 10_000)
                 generated = decoder(latent, noise)
-                value, _ = distribution_loss(
-                    generated, target, projection_tensor,
-                    0.25, 0.25, 0.25, 0.20,
+                value, _ = soft_point_cloud_loss(
+                    generated,
+                    target,
+                    args.cloud_loss_weight,
+                    args.moment_loss_weight,
                 )
                 values.append(float(value))
         decoder.train()
@@ -237,8 +238,11 @@ def main() -> None:
         n_points = real.shape[1]
         noise = sample_decoder_noise(1, n_points, args.noise_dim, device)
         soft = decoder(latent_tensor[population_id][None], noise)
-        loss, components = distribution_loss(
-            soft, real, projection_tensor, 0.25, 0.25, 0.25, 0.20
+        loss, components = soft_point_cloud_loss(
+            soft,
+            real,
+            args.cloud_loss_weight,
+            args.moment_loss_weight,
         )
         decoder_optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -303,9 +307,11 @@ def main() -> None:
                 noise = fixed_noise(population_id, target.shape[1], 20_000)
                 source = decoder(latent, noise)
                 corrected = integrate_corrective_flow(flow, source, args.integration_steps)
-                value, _ = distribution_loss(
-                    corrected, target, projection_tensor,
-                    0.25, 0.25, 0.25, 0.20,
+                value, _ = soft_point_cloud_loss(
+                    corrected,
+                    target,
+                    args.cloud_loss_weight,
+                    args.moment_loss_weight,
                 )
                 values.append(float(value))
         flow.train()
@@ -422,6 +428,18 @@ def main() -> None:
         ),
         "cfm_path": "Meta flow_matching CondOTProbPath",
         "flow_objective": "pure flow-matching MSE; no auxiliary terms",
+        "pipeline_objectives": {
+            "phenogs": (
+                "trained in the HiPoNet encoder checkpoint; latent z is frozen here"
+            ),
+            "soft_point_cloud": "Sinkhorn divergence between soft and real clouds",
+            "flow_matching": "velocity-field MSE",
+            "moments": "marker mean, standard deviation, and covariance matching",
+        },
+        "soft_decoder_objective": (
+            f"{args.cloud_loss_weight} * Sinkhorn point-cloud loss + "
+            f"{args.moment_loss_weight} * moments loss"
+        ),
         "flow_conditioning": "x_t and t only; z conditions only the soft decoder",
         "cell_dim": cell_dim,
         "latent_dim": latent_dim,

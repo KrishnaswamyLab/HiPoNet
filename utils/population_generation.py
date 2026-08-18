@@ -60,6 +60,28 @@ def sinkhorn_divergence(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     ).clamp_min(0.0)
 
 
+def soft_point_cloud_loss(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    cloud_weight: float = 1.0,
+    moment_weight: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Sinkhorn cloud fidelity plus population moments for the soft decoder."""
+    cloud_values, moment_values = [], []
+    for generated, real in zip(prediction, reference):
+        cloud_values.append(sinkhorn_divergence(generated, real))
+        moment_values.append(full_population_moment_loss(generated, real))
+    components = {
+        "point_cloud": torch.stack(cloud_values).mean(),
+        "moments": torch.stack(moment_values).mean(),
+    }
+    total = (
+        cloud_weight * components["point_cloud"]
+        + moment_weight * components["moments"]
+    )
+    return total, components
+
+
 def sliced_wasserstein_loss(
     prediction: torch.Tensor,
     reference: torch.Tensor,
