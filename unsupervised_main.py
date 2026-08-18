@@ -22,7 +22,7 @@ gc.enable()
 # Args
 # ---------------------------------------------------------------------------
 
-parser = ArgumentParser(description="HiPoNet unsupervised autoencoder with UDEMD regularisation")
+parser = ArgumentParser(description="HiPoNet unsupervised autoencoder with phenoGS regularisation")
 parser.add_argument("--raw_dir", type=str, default="pdo_data")
 parser.add_argument("--full", action="store_true")
 parser.add_argument(
@@ -93,36 +93,36 @@ parser.add_argument(
     default=1,
     help="Gradient accumulation steps",
 )
-# UDEMD distance preservation loss
+# phenoGS distance preservation loss
 parser.add_argument(
     "--dist_weight",
     type=float,
     default=0.1,
-    help="Weight λ for the UDEMD distance preservation loss (0 to disable)",
+    help="Weight λ for the phenoGS distance preservation loss (0 to disable)",
 )
 parser.add_argument(
-    "--udemd_knn",
+    "--phenoGS_knn",
     type=int,
     default=10,
-    help="Number of nearest neighbours for the global k-NN graph used by UDEMD",
+    help="Number of nearest neighbours for the global k-NN graph used by phenoGS",
 )
 parser.add_argument(
-    "--udemd_n_scales",
+    "--phenoGS_n_scales",
     type=int,
     default=6,
-    help="Number of dyadic diffusion scales for UDEMD (scales = 1, 2, 4, …, 2^(n_scales-1))",
+    help="Number of dyadic diffusion scales for phenoGS (scales = 1, 2, 4, …, 2^(n_scales-1))",
 )
 parser.add_argument(
-    "--udemd_sigma",
+    "--phenoGS_sigma",
     type=float,
     default=None,
-    help="Gaussian bandwidth for the global UDEMD graph (auto-tuned if None)",
+    help="Gaussian bandwidth for the global phenoGS graph (auto-tuned if None)",
 )
 parser.add_argument(
-    "--udemd_cache",
+    "--phenoGS_cache",
     type=str,
     default=None,
-    help="Path to cache / load the precomputed UDEMD distance matrix (.npy). "
+    help="Path to cache / load the precomputed phenoGS distance matrix (.npy). "
          "If the file exists it is loaded; otherwise it is computed and saved.",
 )
 # Alpha regularisation (kept from supervised script for consistency)
@@ -156,112 +156,6 @@ if args.gpu != -1 and torch.cuda.is_available():
 else:
     args.device = "cpu"
 
-
-# ---------------------------------------------------------------------------
-# UDEMD pre-computation
-# ---------------------------------------------------------------------------
-
-def compute_udemd_distances(
-    PCs: list,
-    knn: int = 10,
-    n_scales: int = 6,
-    sigma: float | None = None,
-) -> np.ndarray:
-    """Compute pairwise Unbalanced Diffusion Earth Mover's Distances between
-    point clouds.
-
-    Each point cloud is treated as a uniform probability distribution over its
-    cells.  A shared k-NN graph is built over all cells from all samples; the
-    diffusion operator P is computed on this graph.  For each sample i the
-    distribution μ_i places mass 1/N_i on its cells and zero elsewhere.
-
-    The UDEMD between samples i and j is approximated by the L1 distance
-    between their stacked diffusion embeddings::
-
-        embed_i = concat(w_t * P^t μ_i  for t in [1, 2, 4, ..., 2^(n_scales-1)])
-        UDEMD(i, j) = ||embed_i - embed_j||_1
-
-    Parameters
-    ----------
-    PCs : list of torch.Tensor, each of shape (N_i, d)
-    knn : int
-        Number of nearest neighbours for the global graph.
-    n_scales : int
-        Number of dyadic diffusion scales.
-    sigma : float or None
-        Gaussian bandwidth.  Auto-tuned from the median squared
-        nearest-neighbour distance if None.
-
-    Returns
-    -------
-    distances : np.ndarray, shape (K, K)
-        Symmetric pairwise UDEMD distance matrix.
-    """
-    K = len(PCs)
-
-    all_cells_list = [pc.detach().cpu().numpy().astype(np.float32) for pc in PCs]
-    sample_sizes = [arr.shape[0] for arr in all_cells_list]
-    all_cells = np.concatenate(all_cells_list, axis=0)   # (N_total, d)
-    N_total = all_cells.shape[0]
-    sample_ids = np.repeat(np.arange(K), sample_sizes)  # (N_total,)
-
-    print(f"  UDEMD: {K} samples, {N_total} total cells, {all_cells.shape[1]} features")
-
-    nn_model = NearestNeighbors(n_neighbors=knn + 1, metric="euclidean", n_jobs=-1)
-    nn_model.fit(all_cells)
-    nn_dists, nn_idx = nn_model.kneighbors(all_cells)  # (N_total, knn+1)
-
-    if sigma is None:
-        sigma = float(np.median(nn_dists[:, 1] ** 2))
-        sigma = max(sigma, 1e-8)
-        print(f"  UDEMD: auto sigma = {sigma:.4g}")
-
-    # Build sparse symmetric Gaussian-weighted adjacency (no self-loops)
-    rows, cols, vals = [], [], []
-    for i in range(N_total):
-        for nb in range(1, knn + 1):
-            j = nn_idx[i, nb]
-            w = float(np.exp(-(nn_dists[i, nb] ** 2) / sigma))
-            rows.append(i)
-            cols.append(j)
-            vals.append(w)
-    W_sp = sp.csr_matrix((vals, (rows, cols)), shape=(N_total, N_total), dtype=np.float32)
-    W_sp = (W_sp + W_sp.T).multiply(0.5)  # symmetrize
-
-    # Row-normalise to get Markov matrix P
-    row_sums = np.array(W_sp.sum(axis=1)).flatten()
-    row_sums = np.maximum(row_sums, 1e-8)
-    P = sp.diags(1.0 / row_sums) @ W_sp  # (N_total, N_total) sparse
-    P = P.astype(np.float32)
-
-    # Per-sample uniform distributions: distrib[:, k] = 1/N_k for sample k's cells
-    distrib = np.zeros((N_total, K), dtype=np.float32)
-    for k in range(K):
-        idx = sample_ids == k
-        n_k = int(idx.sum())
-        if n_k > 0:
-            distrib[idx, k] = 1.0 / n_k
-
-    # Accumulate pairwise L1 distances across dyadic diffusion scales
-    scales = [2 ** i for i in range(n_scales)]
-    dists = np.zeros((K, K), dtype=np.float64)
-    D_current = distrib.copy()   # (N_total, K)
-    current_t = 0
-
-    for t_idx, target_t in enumerate(tqdm(scales, desc="  UDEMD scales", leave=False)):
-        for _ in range(target_t - current_t):
-            D_current = P @ D_current   # sparse × dense
-        current_t = target_t
-
-        weight = 0.5 ** (n_scales - t_idx - 1)
-        # Pairwise L1 distances between diffused distributions at this scale
-        scale_dists = cdist(D_current.T, D_current.T, metric="cityblock")  # (K, K)
-        dists += weight * scale_dists
-
-    dists = 0.5 * (dists + dists.T)  # enforce symmetry numerically
-    return dists.astype(np.float32)
-
-
 # ---------------------------------------------------------------------------
 # Dataset / Collate
 # ---------------------------------------------------------------------------
@@ -279,14 +173,14 @@ class PointCloudDataset(torch.utils.data.Dataset):
         return self.PCs[idx], idx
 
 
-def make_collate_fn(udemd_dists: np.ndarray | None):
+def make_collate_fn(phenoGS_dists: np.ndarray | None):
     """Return a collate function that pads point clouds and extracts the
-    upper-triangular UDEMD sub-matrix for the batch.
+    upper-triangular phenoGS sub-matrix for the batch.
 
     Parameters
     ----------
-    udemd_dists : (K, K) numpy array or None
-        Full pairwise UDEMD distance matrix over all samples.
+    phenoGS_dists : (K, K) numpy array or None
+        Full pairwise phenoGS distance matrix over all samples.
         Pass None when ``dist_weight == 0``.
     """
     def collate(batch):
@@ -303,9 +197,9 @@ def make_collate_fn(udemd_dists: np.ndarray | None):
         arange = torch.arange(input_tensor.shape[1])
         mask = arange.unsqueeze(0) < torch.tensor(lengths).unsqueeze(1)
 
-        if udemd_dists is not None:
+        if phenoGS_dists is not None:
             B = len(indices)
-            sub_mat = udemd_dists[np.ix_(indices, indices)]  # (B, B)
+            sub_mat = phenoGS_dists[np.ix_(indices, indices)]  # (B, B)
             ii, jj = np.triu_indices(B, k=1)
             target_dists = torch.tensor(sub_mat[ii, jj], dtype=torch.float32)
         else:
@@ -385,30 +279,23 @@ def main():
     )
 
     # ------------------------------------------------------------------
-    # Pre-compute UDEMD pairwise distances (once, before training)
+    # Pre-compute phenoGS pairwise distances (once, before training)
     # ------------------------------------------------------------------
-    udemd_dists = None
+    phenoGS_dists = None
     if args.dist_weight > 0.0:
-        if args.udemd_cache and os.path.isfile(args.udemd_cache):
-            print(f"Loading cached UDEMD distances from {args.udemd_cache}")
-            udemd_dists = np.load(args.udemd_cache)
+        if args.phenoGS_cache and os.path.isfile(args.phenoGS_cache):
+            print(f"Loading cached phenoGS distances from {args.phenoGS_cache}")
+            phenoGS_dists = np.load(args.phenoGS_cache)
         else:
-            print("Computing UDEMD pairwise distances ...")
-            udemd_dists = compute_udemd_distances(
-                PCs,
-                knn=args.udemd_knn,
-                n_scales=args.udemd_n_scales,
-                sigma=args.udemd_sigma,
+            raise FileNotFoundError(
+                "Precomputed phenoGS distances were not found. "
+                "Generate them with the Pheno-GS preparation pipeline and pass --phenoGS_cache."
             )
-            if args.udemd_cache:
-                os.makedirs(os.path.dirname(os.path.abspath(args.udemd_cache)), exist_ok=True)
-                np.save(args.udemd_cache, udemd_dists)
-                print(f"UDEMD distances saved to {args.udemd_cache}")
-        if udemd_dists.shape != (len(PCs), len(PCs)):
+        if phenoGS_dists.shape != (len(PCs), len(PCs)):
             raise ValueError(
-                f"Distance matrix shape {udemd_dists.shape} does not match {len(PCs)} populations"
+                f"Distance matrix shape {phenoGS_dists.shape} does not match {len(PCs)} populations"
             )
-        if not np.isfinite(udemd_dists).all() or not np.allclose(udemd_dists, udemd_dists.T):
+        if not np.isfinite(phenoGS_dists).all() or not np.allclose(phenoGS_dists, phenoGS_dists.T):
             raise ValueError("Distance matrix must be finite and symmetric")
 
     # ------------------------------------------------------------------
@@ -474,7 +361,7 @@ def main():
     train_set = torch.utils.data.Subset(dataset, train_indices)
     val_set = torch.utils.data.Subset(dataset, val_indices)
 
-    collate = make_collate_fn(udemd_dists)
+    collate = make_collate_fn(phenoGS_dists)
 
     train_loader = torch.utils.data.DataLoader(
         train_set,

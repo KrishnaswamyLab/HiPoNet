@@ -1072,7 +1072,7 @@ class HiPoNetAutoencoder(nn.Module):
 
     * ``recon_loss`` — MSE between decoded and original HiPoNet wavelet features.
     * ``dist_loss``  — Stress loss: normalised pairwise Euclidean distances in
-      latent space should match normalised precomputed UDEMD distances between
+      latent space should match normalised precomputed PhenoGS distances between
       point clouds.  Targets must be passed to ``compute_loss`` as
       ``target_dists`` (upper-triangular vector, same order as
       ``torch.pdist``).
@@ -1150,7 +1150,7 @@ class HiPoNetAutoencoder(nn.Module):
 
     def _dist_loss(self, z: torch.Tensor, target_dists: torch.Tensor) -> torch.Tensor:
         """Stress loss: MSE between normalised pairwise latent distances and
-        precomputed UDEMD distances (upper-triangular vector, same order as
+        precomputed PhenoGS distances (upper-triangular vector, same order as
         ``torch.pdist``).
         """
         if z.shape[0] < 2:
@@ -1173,7 +1173,7 @@ class HiPoNetAutoencoder(nn.Module):
         ----------
         point_clouds : (B, N, d)
         mask         : (B, N)
-        target_dists : 1-D tensor of length B*(B-1)/2 — precomputed UDEMD
+        target_dists : 1-D tensor of length B*(B-1)/2 — precomputed PhenoGS
                        distances for all pairs in the batch, in the same
                        upper-triangular order as ``torch.pdist``.  Required
                        when ``dist_weight > 0``.
