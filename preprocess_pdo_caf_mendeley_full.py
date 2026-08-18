@@ -54,6 +54,34 @@ def infer_feature_columns(df: pd.DataFrame, group_keys: tuple[str, ...], n_featu
     return numeric
 
 
+def filter_pdo_conditions(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply the PDO population definition supplied by the project team."""
+    filtered = df[
+        df["Culture"].isin(["PDO", "PDOF"])
+        & (df["Cell_type"] == "PDOs")
+        & ~df["Treatment"].isin(["O", "H2O"])
+    ].copy()
+    concentrations = pd.to_numeric(filtered["Concentration"], errors="raise")
+    maximum = concentrations.groupby(filtered["Treatment"], observed=True).transform(
+        "max"
+    )
+    filtered = filtered[concentrations.eq(maximum)].copy()
+    filtered["Condition"] = (
+        filtered["Patient"].astype(str)
+        + "*"
+        + filtered["Treatment"].astype(str)
+        + "*"
+        + filtered["Concentration"].astype(str)
+        + "*"
+        + filtered["Culture"].astype(str)
+        + "*"
+        + filtered["Cell_type"].astype(str)
+        + "_"
+        + filtered["Replicate"].astype(str)
+    )
+    return filtered
+
+
 def make_landmark_cloud(
     values: np.ndarray,
     n_landmarks: int | None,
@@ -132,6 +160,15 @@ def main() -> None:
     )
     parser.add_argument("--group_keys", default=",".join(DEFAULT_GROUP_KEYS))
     parser.add_argument(
+        "--pdo_conditions_only",
+        action="store_true",
+        help=(
+            "Keep PDO/PDOF cultures and PDO cells, exclude O/H2O treatments, "
+            "retain each treatment's maximum available concentration, and create "
+            "the requested Condition label"
+        ),
+    )
+    parser.add_argument(
         "--scaler_holdout_field",
         default=None,
         help="Metadata field whose held-out values are excluded when fitting StandardScaler",
@@ -149,6 +186,13 @@ def main() -> None:
 
     print(f"Loading {args.zip_path}:{args.member}", flush=True)
     df = read_dataframe(args.zip_path, args.member)
+    if args.pdo_conditions_only:
+        df = filter_pdo_conditions(df)
+        print(
+            f"PDO condition filter retained {len(df)} cells and "
+            f"{df['Condition'].nunique()} conditions",
+            flush=True,
+        )
     print(f"Loaded dataframe shape: {df.shape}", flush=True)
     print("Columns:", json.dumps(list(map(str, df.columns))), flush=True)
 
@@ -192,6 +236,25 @@ def main() -> None:
             if queue and (args.max_groups is None or len(selected_keys) < args.max_groups):
                 selected_keys.append(queue.pop(0))
     eligible_groups = ["__".join(key) for key in selected_keys]
+    condition_fields = (
+        "Patient",
+        "Treatment",
+        "Concentration",
+        "Culture",
+        "Cell_type",
+        "Replicate",
+    )
+    if all(field in group_keys for field in condition_fields):
+        condition_names = []
+        for key in selected_keys:
+            metadata = dict(zip(group_keys, key))
+            condition_names.append(
+                "*".join(metadata[field] for field in condition_fields[:-1])
+                + "_"
+                + metadata["Replicate"]
+            )
+    else:
+        condition_names = eligible_groups
     group_to_indices = {
         "__".join(key): eligible[key]
         for key in selected_keys
@@ -270,6 +333,7 @@ def main() -> None:
         populations=populations_obj,
         labels=labels,
         group_names=np.asarray(eligible_groups, dtype=object),
+        condition_names=np.asarray(condition_names, dtype=object),
         feature_columns=np.asarray(feature_columns, dtype=object),
         group_keys=np.asarray(group_keys, dtype=object),
         num_labels=np.asarray([len(eligible_groups)], dtype=np.int64),
@@ -307,6 +371,8 @@ def main() -> None:
         "n_eligible_groups": len(eligible_groups),
         "selected_contexts": [list(context) for context in selected_contexts],
         "group_keys": list(group_keys),
+        "pdo_conditions_only": args.pdo_conditions_only,
+        "condition_count": len(set(condition_names)),
         "feature_columns": feature_columns,
         "scaler_fit_cell_count": int(len(scaler_rows)),
         "scaler_holdout_field": args.scaler_holdout_field,

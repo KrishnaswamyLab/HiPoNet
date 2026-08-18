@@ -21,6 +21,11 @@ def main() -> None:
 
     cache = np.load(args.population_cache, allow_pickle=True)
     names = [str(value) for value in cache["group_names"]]
+    condition_names = (
+        np.asarray(cache["condition_names"], dtype=object)
+        if "condition_names" in cache.files
+        else np.asarray(names, dtype=object)
+    )
     group_keys = [str(value) for value in cache["group_keys"]]
     features = [str(value) for value in cache["feature_columns"]]
     expected_sizes = cache["original_population_sizes"].astype(np.int64)
@@ -63,6 +68,7 @@ def main() -> None:
 
     np.save(args.out_dir / "population_offsets.npy", offsets)
     np.save(args.out_dir / "group_names.npy", np.asarray(names, dtype=object))
+    np.save(args.out_dir / "condition_names.npy", condition_names)
     np.save(args.out_dir / "feature_columns.npy", np.asarray(features, dtype=object))
     summary = {
         "source_zip": str(args.zip_path),
