@@ -19,7 +19,7 @@ from torch import nn
 from models.population_flow import ConditionedResidualBlock, SinusoidalTimeEmbedding
 from utils.population_generation import (
     aggregate,
-    distribution_loss,
+    emd_point_cloud_loss,
     evaluation_metrics,
     sample_cells,
 )
@@ -141,6 +141,11 @@ def main() -> None:
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--n_blocks", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument(
+        "--emd_solver", choices=("exact", "sinkhorn_log"), default="sinkhorn_log"
+    )
+    parser.add_argument("--emd_regularization", type=float, default=0.2)
+    parser.add_argument("--emd_iterations", type=int, default=100)
     parser.add_argument("--eval_every", type=int, default=200)
     parser.add_argument("--patience", type=int, default=1600)
     parser.add_argument("--integration_steps", type=int, default=32)
@@ -203,11 +208,6 @@ def main() -> None:
     def from_model(values: np.ndarray) -> np.ndarray:
         return (values * cell_std + cell_mean).astype(np.float32)
 
-    projection_rng = np.random.default_rng(args.seed + 2)
-    projections = projection_rng.normal(size=(32, cell_dim)).astype(np.float32)
-    projections /= np.linalg.norm(projections, axis=1, keepdims=True)
-    projection_tensor = torch.from_numpy(projections).to(device)
-
     model = LatentConditionedVelocityField(
         cell_dim, latent_dim, args.hidden_dim, n_blocks=args.n_blocks
     ).to(device)
@@ -239,8 +239,12 @@ def main() -> None:
                     latent_tensor[population_id][None],
                     args.integration_steps,
                 )
-                value, _ = distribution_loss(
-                    prediction, target, projection_tensor, 0.25, 0.25, 0.25, 0.20
+                value, _ = emd_point_cloud_loss(
+                    prediction,
+                    target,
+                    args.emd_solver,
+                    args.emd_regularization,
+                    args.emd_iterations,
                 )
                 values.append(float(value))
         model.train()
@@ -276,7 +280,7 @@ def main() -> None:
                 "population_id": population_id,
                 "training_cells": len(target),
                 "flow_matching_mse": float(loss.detach()),
-                "validation_distribution": score,
+                "validation_emd": score,
             }
             history.append(row)
             print(json.dumps(row), flush=True)
@@ -300,6 +304,7 @@ def main() -> None:
         if args.eval_populations > 0
         else test_ids
     )
+    projection_rng = np.random.default_rng(args.seed + 2)
     metric_projections = projection_rng.normal(size=(64, cell_dim))
     metric_projections /= np.linalg.norm(metric_projections, axis=1, keepdims=True)
     rows = []
@@ -353,6 +358,10 @@ def main() -> None:
         "path": "CondOTProbPath linear Gaussian-to-real-cell path",
         "training_pairing": "independent Gaussian and within-population real cells",
         "objective": "pure flow-matching MSE; no decoder or auxiliary losses",
+        "checkpoint_selection": "POT EMD between generated and real validation populations",
+        "validation_emd_solver": args.emd_solver,
+        "validation_emd_regularization": args.emd_regularization,
+        "validation_emd_iterations": args.emd_iterations,
         "conditioning": "x_t, t, and the population HiPoNet latent z",
         "cell_dim": cell_dim,
         "latent_dim": latent_dim,
