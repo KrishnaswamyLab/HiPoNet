@@ -101,24 +101,6 @@ parser.add_argument(
     help="Weight λ for the phenoGS distance preservation loss (0 to disable)",
 )
 parser.add_argument(
-    "--phenoGS_knn",
-    type=int,
-    default=10,
-    help="Number of nearest neighbours for the global k-NN graph used by phenoGS",
-)
-parser.add_argument(
-    "--phenoGS_n_scales",
-    type=int,
-    default=6,
-    help="Number of dyadic diffusion scales for phenoGS (scales = 1, 2, 4, …, 2^(n_scales-1))",
-)
-parser.add_argument(
-    "--phenoGS_sigma",
-    type=float,
-    default=None,
-    help="Gaussian bandwidth for the global phenoGS graph (auto-tuned if None)",
-)
-parser.add_argument(
     "--phenoGS_cache",
     type=str,
     default=None,
