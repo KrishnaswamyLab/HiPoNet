@@ -116,7 +116,8 @@ class GraphFeatLearningLayer(nn.Module):
         self.dimension = dimension
         self.threshold = threshold
         self.device = device
-        self.gwt = GraphWaveletTransform(J, device, pooling=pooling)
+        self.J = J
+        self.pooling = pooling
         self.sigma = sigma
         self.normalize_alphas = normalize_alphas
         self.ignore_alphas = ignore_alphas
@@ -142,6 +143,64 @@ class GraphFeatLearningLayer(nn.Module):
         assert pooling or (self.n_weights == 1), (
             "n_weights > 1 not supported without pooling"
         )
+
+    def _apply_gwt(self, W, X, mask):
+        """Run sparse GWT on a padded batch of dense diffusion operators."""
+        leading_shape = W.shape[:-2]
+        n_nodes = W.shape[-1]
+        feature_dim = X.shape[-1]
+        flat_W = W.reshape(-1, n_nodes, n_nodes)
+        flat_X = X.reshape(-1, n_nodes, feature_dim)
+        flat_mask = mask.reshape(-1, n_nodes)
+
+        edge_indices = []
+        edge_weights = []
+        node_features = []
+        graph_ids = []
+        valid_indices = []
+        offset = 0
+        for graph_id in range(len(flat_W)):
+            valid = torch.where(flat_mask[graph_id])[0]
+            if len(valid) == 0:
+                raise ValueError("Graph wavelet transform received an empty graph")
+            adjacency = flat_W[graph_id][valid][:, valid]
+            row, column = torch.where(adjacency != 0)
+            # Dense diffusion uses P @ X, so j -> i carries weight P[i, j].
+            edge_indices.append(torch.stack((column + offset, row + offset)))
+            edge_weights.append(adjacency[row, column])
+            node_features.append(flat_X[graph_id, valid])
+            graph_ids.append(
+                torch.full(
+                    (len(valid),), graph_id, dtype=torch.long, device=self.device
+                )
+            )
+            valid_indices.append(valid)
+            offset += len(valid)
+
+        edge_index = torch.cat(edge_indices, dim=1)
+        edge_weight = torch.cat(edge_weights)
+        features = torch.cat(node_features)
+        batch = torch.cat(graph_ids)
+        gwt = GraphWaveletTransform(
+            edge_index,
+            edge_weight,
+            features,
+            self.J,
+            self.device,
+            pooling=self.pooling,
+        )
+        transformed = gwt.generate_timepoint_features(batch)
+        if self.pooling:
+            return transformed.reshape(*leading_shape, transformed.shape[-1])
+
+        output = transformed.new_zeros(
+            (len(flat_W), n_nodes, transformed.shape[-1])
+        )
+        cursor = 0
+        for graph_id, valid in enumerate(valid_indices):
+            output[graph_id, valid] = transformed[cursor : cursor + len(valid)]
+            cursor += len(valid)
+        return output.reshape(*leading_shape, n_nodes, transformed.shape[-1])
 
     def forward(self, point_clouds, mask, node_features=None):
         if self.ignore_alphas:
@@ -172,8 +231,8 @@ class GraphFeatLearningLayer(nn.Module):
             # Mask has shape (B, N), expand to (B, n_weights, N) to match W and X_bar
             mask = mask.unsqueeze(1).expand((-1, self.n_weights, -1))
 
-        features = self.gwt(W, X_bar, mask)
-        if self.gwt.pooling:
+        features = self._apply_gwt(W, X_bar, mask)
+        if self.pooling:
             # Reshape to (B, n_weights * feature_dim)
             return features.view(features.size(0), -1)
         else:
@@ -181,7 +240,8 @@ class GraphFeatLearningLayer(nn.Module):
             # We then only select the nodes according to the mask
             # This gives a tensor of shape (sum(num_points_i), feature_dim)
             # where num_points_i is the number of valid points in point_clouds[i] (or equivalently mask[i].sum())
-            return features.squeeze(1)[mask]
+            node_mask = mask.squeeze(1) if mask.ndim == 3 else mask
+            return features.squeeze(1)[node_mask]
 
     def forward_with_W(self, point_clouds, mask, node_features=None):
         """Like forward() but also returns the diffusion matrix W for the GW loss.
@@ -215,11 +275,12 @@ class GraphFeatLearningLayer(nn.Module):
         mask_out = mask
         if alphas is not None:
             mask_out = mask.unsqueeze(1).expand((-1, self.n_weights, -1))
-        features = self.gwt(W, X_bar, mask_out)
-        if self.gwt.pooling:
+        features = self._apply_gwt(W, X_bar, mask_out)
+        if self.pooling:
             return features.view(features.size(0), -1), W, mask
         else:
-            return features.squeeze(1)[mask_out], W, mask
+            node_mask = mask_out.squeeze(1) if mask_out.ndim == 3 else mask_out
+            return features.squeeze(1)[node_mask], W, mask
 
 
 class SimplicialFeatLearningLayerTri(nn.Module):
